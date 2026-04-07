@@ -1,0 +1,237 @@
+use std::{
+    fs::File,
+    io::{self, Write},
+    path::PathBuf,
+    process,
+};
+use thiserror::Error;
+
+use crate::{
+    net::interface::NetworkInterface,
+    ptp::state::{PtpSnapshot, SnapshotParseError},
+};
+
+#[derive(Debug, Error)]
+pub enum PtpQueryError {
+    /// Failed to execute the `pmc` process.
+    #[error("failed to execute pmc: {0}")]
+    Io(std::io::Error),
+
+    /// `pmc` exited with a non-zero status.
+    #[error("pmc exited with status {0}")]
+    CommandFailed(process::ExitStatus),
+
+    /// Output was not valid UTF-8.
+    #[error("pmc output was not valid UTF-8")]
+    InvalidUtf8(std::string::FromUtf8Error),
+
+    /// Failed to parse the output into a snapshot.
+    #[error(transparent)]
+    Parse(#[from] SnapshotParseError),
+}
+
+/// Defines the role of a PTP instance.
+///
+/// A [`PtpInstance`] operates either as:
+/// - [`PtpRole::Master`]: acts as the grandmaster clock
+/// - [`PtpRole::Slave`]: synchronizes to a remote master
+///
+/// This directly maps to the presence or absence of the `-s` flag in `ptp4l`.
+#[derive(Debug, Clone, Copy)]
+pub enum PtpRole {
+    /// Grandmaster clock (no upstream synchronization source).
+    Master,
+    /// Client clock that synchronizes to a master.
+    Slave,
+}
+
+/// A managed instance of the `ptp4l` daemon bound to a specific network interface.
+///
+/// This struct provides a type-safe abstraction for:
+/// - spawning a `ptp4l` process
+/// - isolating its control sockets
+/// - querying its synchronization state via `pmc`
+///
+/// # Design goals
+///
+/// - No reliance on pre-existing configuration files
+/// - No shared global sockets between instances
+/// - Safe to run multiple instances concurrently
+/// - Explicit ownership and cleanup of runtime resources
+///
+/// # Configuration
+///
+/// A temporary configuration file is generated in `/tmp`, containing
+/// unique socket paths derived from the instance name and process ID.
+///
+/// # Lifecycle
+///
+/// - [`start`](Self::start) spawns the `ptp4l` process
+/// - [`get_status`](Self::get_status) queries synchronization state
+/// - [`stop`](Self::stop) terminates the process
+///
+/// Resources are automatically cleaned up when the instance is dropped.
+///
+/// # Permissions
+///
+/// Running `ptp4l` typically requires:
+/// - `CAP_NET_ADMIN`
+/// - `CAP_SYS_TIME`
+#[derive(Debug)]
+pub struct PtpInstance {
+    interface: NetworkInterface,
+    role: PtpRole,
+    config_path: PathBuf,
+    process: Option<process::Child>,
+}
+
+impl PtpInstance {
+    /// Creates a new [`PtpInstance`] bound to a network interface and role.
+    ///
+    /// This generates a temporary configuration file in `/tmp` with
+    /// unique socket paths to avoid conflicts with other instances.
+    ///
+    /// # Arguments
+    /// * `interface` - A network interface to run on
+    /// * `role` - Whether this instance acts as master or slave
+    /// * `name` - A unique identifier used to namespace runtime resources
+    ///
+    /// # Errors
+    /// Returns an error if the configuration file cannot be created.
+    pub fn new(interface: NetworkInterface, role: PtpRole, name: &str) -> io::Result<Self> {
+        let config_path = Self::create_config(name)?;
+
+        Ok(Self {
+            interface,
+            role,
+            config_path,
+            process: None,
+        })
+    }
+
+    /// Generates a temporary `ptp4l` configuration file with isolated sockets.
+    ///
+    /// The configuration includes:
+    /// - `uds_address`
+    /// - `uds_ro_address`
+    ///
+    /// These are uniquely namespaced using the provided `name` and process ID
+    /// to avoid collisions between multiple instances.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be created or written.
+    fn create_config(name: &str) -> io::Result<PathBuf> {
+        let pid = std::process::id();
+        let path = PathBuf::from(format!("/tmp/ptp4l-{name}-{pid}.cfg"));
+
+        let mut file = File::create(&path)?;
+
+        writeln!(
+            file,
+            "[global]\nuds_address /var/run/ptp4l-{name}-{pid}\nuds_ro_address /var/run/ptp4l-{name}-{pid}-ro"
+        )?;
+
+        Ok(path)
+    }
+
+    /// Starts the `ptp4l` process for this instance.
+    ///
+    /// The process is configured with:
+    /// - hardware timestamping (`-H`)
+    /// - IEEE 802.3 transport (`-2`)
+    /// - the generated configuration file
+    ///
+    /// If the role is [`PtpRole::Slave`], the `-s` flag is included.
+    ///
+    /// # Errors
+    /// Returns an error if the process cannot be spawned.
+    pub fn start(&mut self) -> io::Result<()> {
+        let mut args = vec![
+            "-i".to_string(),
+            self.interface.name().to_string(),
+            "-H".to_string(),
+            "-m".to_string(),
+            "-2".to_string(),
+            "-f".to_string(),
+            self.config_path.to_string_lossy().into_owned(),
+        ];
+
+        if matches!(self.role, PtpRole::Slave) {
+            args.push("-s".to_string());
+        }
+
+        let child = process::Command::new("ptp4l")
+            .args(&args)
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null())
+            .spawn()?;
+
+        self.process = Some(child);
+
+        Ok(())
+    }
+
+    /// Stops the running `ptp4l` process, if any.
+    ///
+    /// # Errors
+    /// Returns an error if the process exists but cannot be terminated.
+    pub fn stop(&mut self) -> io::Result<()> {
+        if let Some(child) = &mut self.process {
+            child.kill()?;
+        }
+
+        Ok(())
+    }
+
+    /// Queries the current PTP state via `pmc` and returns a parsed [`PtpSnapshot`].
+    ///
+    /// This executes a single `pmc` invocation requesting:
+    /// - `TIME_STATUS_NP`
+    /// - `PORT_DATA_SET`
+    /// - `CURRENT_DATA_SET`
+    ///
+    /// The output is then parsed into a strongly-typed [`PtpSnapshot`].
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - the `pmc` process fails to execute
+    /// - the process exits with a non-zero status
+    /// - the output cannot be parsed into a valid snapshot
+    pub fn snapshot(&self) -> Result<PtpSnapshot, PtpQueryError> {
+        let output = process::Command::new("pmc")
+            .args([
+                "-u",
+                "-b",
+                "0",
+                "-f",
+                self.config_path.to_string_lossy().as_ref(),
+                "GET TIME_STATUS_NP",
+                "GET PORT_DATA_SET",
+                "GET CURRENT_DATA_SET",
+            ])
+            .output()
+            .map_err(PtpQueryError::Io)?;
+
+        if !output.status.success() {
+            return Err(PtpQueryError::CommandFailed(output.status));
+        }
+
+        let text = String::from_utf8(output.stdout).map_err(PtpQueryError::InvalidUtf8)?;
+
+        PtpSnapshot::parse_pmc_output(&text).map_err(PtpQueryError::Parse)
+    }
+}
+
+impl Drop for PtpInstance {
+    fn drop(&mut self) {
+        // Best effort cleanup, no panics
+
+        // Stop process if still running
+        if let Some(child) = &mut self.process {
+            let _ = child.kill();
+        }
+
+        // Remove the temporary config file
+        let _ = std::fs::remove_file(&self.config_path);
+    }
+}
