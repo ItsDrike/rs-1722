@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rs_1722::net::interface::NetworkInterface;
@@ -18,6 +18,7 @@ const MASTER_INTERFACE: &str = "enp1s0";
 const SLAVE_INTERFACE: &str = "enp3s0";
 const UNSYNCHRONIZED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SYNCHRONIZED_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEGRADED_STATUS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum SlaveSyncState {
@@ -34,12 +35,18 @@ struct MonitorState {
     slave_sync_state: SlaveSyncState,
     /// Last observed raw slave PTP port state.
     last_slave_port_state: Option<PortState>,
-    /// Tracks whether the slave snapshot has been temporarily unavailable.
-    slave_snapshot_pending: bool,
+    /// Last time an "unavailable" status log was emitted for the slave snapshot.
+    last_slave_pending_log: Option<Instant>,
+    /// Last time an "unsynchronized" status log was emitted for the slave.
+    last_slave_unsync_log: Option<Instant>,
+    /// Last time a "slave process down" error was emitted.
+    last_slave_process_down_log: Option<Instant>,
     /// Last observed raw master PTP port state.
     last_master_port_state: Option<PortState>,
-    /// Tracks whether the master snapshot has been temporarily unavailable.
-    master_snapshot_pending: bool,
+    /// Last time an "unavailable" status log was emitted for the master.
+    last_master_pending_log: Option<Instant>,
+    /// Last time a "master process down" error was emitted.
+    last_master_process_down_log: Option<Instant>,
 }
 
 /// Starts PTP instances, waits for initial slave synchronization,
@@ -72,7 +79,7 @@ fn main() {
     let running = setup_shutdown_flag();
 
     let mut monitor_state = MonitorState::default();
-    if !wait_for_initial_sync(&master, &slave, running.as_ref(), &mut monitor_state) {
+    if !wait_for_initial_sync(&mut master, &mut slave, running.as_ref(), &mut monitor_state) {
         info!("shutdown requested before initial synchronization completed");
         stop_instance(&mut master, "master");
         stop_instance(&mut slave, "slave");
@@ -80,7 +87,7 @@ fn main() {
     }
 
     info!("initial synchronization complete; entering application loop");
-    monitor_loop(&master, &slave, running.as_ref(), &mut monitor_state);
+    monitor_loop(&mut master, &mut slave, running.as_ref(), &mut monitor_state);
 
     info!("shutting down PTP instances");
     stop_instance(&mut master, "master");
@@ -115,8 +122,8 @@ fn setup_shutdown_flag() -> Arc<AtomicBool> {
 ///
 /// Returns `true` when synchronization is reached before shutdown.
 fn wait_for_initial_sync(
-    master: &PtpInstance,
-    slave: &PtpInstance,
+    master: &mut PtpInstance,
+    slave: &mut PtpInstance,
     running: &AtomicBool,
     state: &mut MonitorState,
 ) -> bool {
@@ -140,7 +147,7 @@ fn wait_for_initial_sync(
 }
 
 /// Polls PTP state until shutdown and adapts polling cadence by sync status.
-fn monitor_loop(master: &PtpInstance, slave: &PtpInstance, running: &AtomicBool, state: &mut MonitorState) {
+fn monitor_loop(master: &mut PtpInstance, slave: &mut PtpInstance, running: &AtomicBool, state: &mut MonitorState) {
     let span = info_span!("monitor");
     let _enter = span.enter();
 
@@ -161,30 +168,74 @@ fn monitor_loop(master: &PtpInstance, slave: &PtpInstance, running: &AtomicBool,
 /// Collects and processes one slave snapshot.
 ///
 /// Returns `true` when the sampled snapshot is synchronized.
-fn handle_slave_snapshot(slave: &PtpInstance, state: &mut MonitorState, warn_on_unsync: bool) -> bool {
+fn handle_slave_snapshot(slave: &mut PtpInstance, state: &mut MonitorState, warn_on_unsync: bool) -> bool {
     match slave.snapshot() {
-        Ok(snapshot) => on_slave_snapshot(&snapshot, state, warn_on_unsync),
+        Ok(snapshot) => {
+            if state.last_slave_process_down_log.is_some() {
+                info!("slave ptp4l process became reachable again");
+            }
+
+            state.last_slave_process_down_log = None;
+
+            on_slave_snapshot(&snapshot, state, warn_on_unsync)
+        }
         Err(PtpQueryError::NotReady(dataset)) => {
+            if state.last_slave_process_down_log.is_some() {
+                info!("slave ptp4l process became reachable again");
+            }
+
+            state.last_slave_process_down_log = None;
+
             if warn_on_unsync
                 && state.slave_sync_state == SlaveSyncState::Synchronized
-                && !state.slave_snapshot_pending
+                && state.last_slave_pending_log.is_none()
             {
                 warn!(
                     missing_dataset = dataset,
                     "slave snapshot temporarily unavailable after synchronization"
                 );
-            } else if !state.slave_snapshot_pending {
+            } else if state.last_slave_pending_log.is_none() {
                 debug!(
                     missing_dataset = dataset,
                     "slave snapshot not ready yet; waiting for ptp4l startup"
                 );
             }
 
-            state.slave_snapshot_pending = true;
+            state.last_slave_pending_log.get_or_insert_with(Instant::now);
+            false
+        }
+        Err(PtpQueryError::ProcessExited(status)) => {
+            state.last_slave_pending_log = None;
+            state.slave_sync_state = SlaveSyncState::Unsynchronized;
+
+            if state.last_slave_process_down_log.is_none() {
+                error!(status = %status, "slave ptp4l process exited unexpectedly");
+                state.last_slave_process_down_log = Some(Instant::now());
+            } else if should_emit_periodic(&mut state.last_slave_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+                warn!(
+                    status = %status,
+                    "slave ptp4l process remains down; no auto-restart configured"
+                );
+            }
+
+            false
+        }
+        Err(PtpQueryError::ProcessNotRunning) => {
+            state.last_slave_pending_log = None;
+            state.slave_sync_state = SlaveSyncState::Unsynchronized;
+
+            if state.last_slave_process_down_log.is_none() {
+                error!("slave ptp4l process not running");
+                state.last_slave_process_down_log = Some(Instant::now());
+            } else if should_emit_periodic(&mut state.last_slave_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+                warn!("slave ptp4l process not running");
+            }
+
             false
         }
         Err(error) => {
-            state.slave_snapshot_pending = false;
+            state.last_slave_process_down_log = None;
+            state.last_slave_pending_log = None;
             error!(error = %error, "failed to collect slave snapshot");
             false
         }
@@ -195,9 +246,9 @@ fn handle_slave_snapshot(slave: &PtpInstance, state: &mut MonitorState, warn_on_
 ///
 /// Returns `true` when the provided snapshot is synchronized.
 fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_unsync: bool) -> bool {
-    if state.slave_snapshot_pending {
+    if state.last_slave_pending_log.is_some() {
         debug!("slave snapshot became available");
-        state.slave_snapshot_pending = false;
+        state.last_slave_pending_log = None;
     }
 
     let current_state = &snapshot.port_data.port_state;
@@ -244,10 +295,16 @@ fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_u
         }
 
         state.slave_sync_state = SlaveSyncState::Synchronized;
+        state.last_slave_unsync_log = None;
         true
     } else {
         if warn_on_unsync && state.slave_sync_state == SlaveSyncState::Synchronized {
             warn!(state = ?current_state, "slave clock is not synchronized");
+            state.last_slave_unsync_log = Some(Instant::now());
+        } else if warn_on_unsync
+            && should_emit_periodic(&mut state.last_slave_unsync_log, DEGRADED_STATUS_LOG_INTERVAL)
+        {
+            debug!(state = ?current_state, "slave remains unsynchronized");
         } else if !warn_on_unsync && state.slave_sync_state != SlaveSyncState::Unsynchronized {
             debug!(state = ?current_state, "waiting for initial slave synchronization");
         }
@@ -268,40 +325,104 @@ fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_u
 }
 
 /// Collects and logs one master snapshot with reduced verbosity.
-fn handle_master_snapshot(master: &PtpInstance, state: &mut MonitorState) {
+fn handle_master_snapshot(master: &mut PtpInstance, state: &mut MonitorState) {
     match master.snapshot() {
-        Ok(snapshot) => {
-            if state.master_snapshot_pending {
-                debug!("master snapshot became available");
-                state.master_snapshot_pending = false;
-            }
-
-            let current_state = &snapshot.port_data.port_state;
-            match state.last_master_port_state.as_ref() {
-                Some(previous_state) if previous_state != current_state => {
-                    debug!(previous_state = ?previous_state, state = ?current_state, "master state changed");
-                }
-                None => {
-                    debug!(state = ?current_state, "master initial state observed");
-                }
-                _ => {}
-            }
-
-            state.last_master_port_state = Some(current_state.clone());
-        }
-        Err(PtpQueryError::NotReady(dataset)) => {
-            if !state.master_snapshot_pending {
-                debug!(
-                    missing_dataset = dataset,
-                    "master snapshot not ready yet; waiting for ptp4l startup"
-                );
-            }
-
-            state.master_snapshot_pending = true;
-        }
+        Ok(snapshot) => on_master_snapshot_ok(&snapshot, state),
+        Err(PtpQueryError::NotReady(dataset)) => on_master_snapshot_not_ready(state, dataset),
+        Err(PtpQueryError::ProcessExited(status)) => on_master_process_down(state, Some(status)),
+        Err(PtpQueryError::ProcessNotRunning) => on_master_process_down(state, None),
         Err(error) => {
-            state.master_snapshot_pending = false;
+            state.last_master_process_down_log = None;
+            state.last_master_pending_log = None;
             error!(error = %error, "failed to collect master snapshot");
+        }
+    }
+}
+
+fn on_master_snapshot_ok(snapshot: &PtpSnapshot, state: &mut MonitorState) {
+    if state.last_master_process_down_log.is_some() {
+        info!("master ptp4l process became reachable again");
+    }
+
+    state.last_master_process_down_log = None;
+
+    if state.last_master_pending_log.is_some() {
+        debug!("master snapshot became available");
+        state.last_master_pending_log = None;
+    }
+
+    let current_state = &snapshot.port_data.port_state;
+    match state.last_master_port_state.as_ref() {
+        Some(previous_state) if previous_state != current_state => {
+            debug!(previous_state = ?previous_state, state = ?current_state, "master state changed");
+        }
+        None => {
+            debug!(state = ?current_state, "master initial state observed");
+        }
+        _ => {}
+    }
+
+    state.last_master_port_state = Some(current_state.clone());
+}
+
+fn on_master_snapshot_not_ready(state: &mut MonitorState, dataset: &'static str) {
+    if state.last_master_process_down_log.is_some() {
+        info!("master ptp4l process became reachable again");
+    }
+
+    state.last_master_process_down_log = None;
+
+    if state.last_master_pending_log.is_none() {
+        if state.last_master_port_state.is_some() {
+            warn!(missing_dataset = dataset, "master snapshot unavailable after startup");
+        } else {
+            debug!(
+                missing_dataset = dataset,
+                "master snapshot not ready yet; waiting for ptp4l startup"
+            );
+        }
+
+        state.last_master_pending_log = Some(Instant::now());
+    } else if should_emit_periodic(&mut state.last_master_pending_log, DEGRADED_STATUS_LOG_INTERVAL) {
+        if state.last_master_port_state.is_some() {
+            warn!(missing_dataset = dataset, "master snapshot still unavailable");
+        } else {
+            debug!(
+                missing_dataset = dataset,
+                "master snapshot still not ready during startup"
+            );
+        }
+    }
+}
+
+fn on_master_process_down(state: &mut MonitorState, status: Option<process::ExitStatus>) {
+    state.last_master_pending_log = None;
+
+    if state.last_master_process_down_log.is_none() {
+        if let Some(status) = status {
+            error!(status = %status, "master ptp4l process exited unexpectedly");
+        } else {
+            error!("master ptp4l process not running");
+        }
+
+        state.last_master_process_down_log = Some(Instant::now());
+    } else if should_emit_periodic(&mut state.last_master_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+        if let Some(status) = status {
+            warn!(status = %status, "master ptp4l process not running");
+        } else {
+            warn!("master ptp4l process not running");
+        }
+    }
+}
+
+fn should_emit_periodic(last_emitted: &mut Option<Instant>, interval: Duration) -> bool {
+    let now = Instant::now();
+
+    match last_emitted {
+        Some(previous) if now.duration_since(*previous) < interval => false,
+        _ => {
+            *last_emitted = Some(now);
+            true
         }
     }
 }

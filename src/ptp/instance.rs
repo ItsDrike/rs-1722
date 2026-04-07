@@ -32,6 +32,14 @@ pub enum PtpQueryError {
     #[error("ptp4l is still initializing (missing dataset `{0}`)")]
     NotReady(&'static str),
 
+    /// Managed `ptp4l` process has already exited.
+    #[error("ptp4l process exited with status {0}")]
+    ProcessExited(process::ExitStatus),
+
+    /// Managed `ptp4l` process is not currently running.
+    #[error("ptp4l process is not running")]
+    ProcessNotRunning,
+
     /// Failed to parse the output into a snapshot.
     #[error(transparent)]
     Parse(#[from] SnapshotParseError),
@@ -237,12 +245,16 @@ impl PtpInstance {
     ///
     /// # Errors
     /// Returns an error if:
+    /// - the managed `ptp4l` process is not running
+    /// - the managed `ptp4l` process exited
     /// - the `pmc` process fails to execute
     /// - the process exits with a non-zero status
     /// - the output cannot be parsed into a valid snapshot
-    pub fn snapshot(&self) -> Result<PtpSnapshot, PtpQueryError> {
+    pub fn snapshot(&mut self) -> Result<PtpSnapshot, PtpQueryError> {
         let span = info_span!("snapshot", role = ?self.role, interface = %self.interface);
         let _enter = span.enter();
+
+        self.ensure_process_running()?;
 
         trace!(
             target: SNAPSHOT_POLL_LOG_TARGET,
@@ -268,6 +280,8 @@ impl PtpInstance {
             })?;
 
         if !output.status.success() {
+            self.ensure_process_running()?;
+
             warn!(status = %output.status, "pmc exited with non-zero status");
             return Err(PtpQueryError::CommandFailed(output.status));
         }
@@ -279,7 +293,11 @@ impl PtpInstance {
 
         let snapshot = match PtpSnapshot::parse_pmc_output(&text) {
             Ok(snapshot) => snapshot,
-            Err(SnapshotParseError::MissingDataset(dataset)) => return Err(PtpQueryError::NotReady(dataset)),
+            Err(SnapshotParseError::MissingDataset(dataset)) => {
+                self.ensure_process_running()?;
+
+                return Err(PtpQueryError::NotReady(dataset));
+            }
             Err(error) => {
                 warn!(error = %error, "failed to parse pmc output");
                 return Err(PtpQueryError::Parse(error));
@@ -294,6 +312,27 @@ impl PtpInstance {
         );
 
         Ok(snapshot)
+    }
+
+    /// Verifies whether the managed `ptp4l` process is alive.
+    ///
+    /// # Errors
+    /// Returns:
+    /// - [`PtpQueryError::ProcessNotRunning`] if no child process is tracked
+    /// - [`PtpQueryError::ProcessExited`] if the child has terminated
+    /// - [`PtpQueryError::Io`] if the process state cannot be queried
+    fn ensure_process_running(&mut self) -> Result<(), PtpQueryError> {
+        let Some(child) = self.process.as_mut() else {
+            return Err(PtpQueryError::ProcessNotRunning);
+        };
+
+        match child.try_wait().map_err(PtpQueryError::Io)? {
+            Some(status) => {
+                self.process = None;
+                Err(PtpQueryError::ProcessExited(status))
+            }
+            None => Ok(()),
+        }
     }
 }
 
