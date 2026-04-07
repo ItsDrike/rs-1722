@@ -1,0 +1,2 @@
+[alias]
+clippy-all = "clippy --workspace --all-targets --all-features"
