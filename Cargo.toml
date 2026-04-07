@@ -12,6 +12,8 @@ license = "LGPL-3.0-only"
 [dependencies]
 ctrlc = "3.5.2"
 thiserror = "2.0.18"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [dev-dependencies]
 
