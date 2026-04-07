@@ -20,4 +20,5 @@ Default filtering is set to `info,rs_1722=debug`. You can override this with the
 ```bash
 RUST_LOG=debug cargo run
 RUST_LOG=rs_1722=trace cargo run
+RUST_LOG='info,rs_1722=trace,rs_1722::ptp::snapshot_poll=off' cargo run
 ```

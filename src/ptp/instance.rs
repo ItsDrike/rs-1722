@@ -5,12 +5,14 @@ use std::{
     process,
 };
 use thiserror::Error;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, info_span, trace, warn};
 
 use crate::{
     net::interface::NetworkInterface,
     ptp::state::{PtpSnapshot, SnapshotParseError},
 };
+
+const SNAPSHOT_POLL_LOG_TARGET: &str = "rs_1722::ptp::snapshot_poll";
 
 #[derive(Debug, Error)]
 pub enum PtpQueryError {
@@ -25,6 +27,10 @@ pub enum PtpQueryError {
     /// Output was not valid UTF-8.
     #[error("pmc output was not valid UTF-8")]
     InvalidUtf8(std::string::FromUtf8Error),
+
+    /// `pmc` responded but `ptp4l` has not published all datasets yet.
+    #[error("ptp4l is still initializing (missing dataset `{0}`)")]
+    NotReady(&'static str),
 
     /// Failed to parse the output into a snapshot.
     #[error(transparent)]
@@ -161,12 +167,11 @@ impl PtpInstance {
     /// # Errors
     /// Returns an error if the process cannot be spawned.
     pub fn start(&mut self) -> io::Result<()> {
+        let span = info_span!("start", role = ?self.role, interface = %self.interface);
+        let _enter = span.enter();
+
         if self.process.is_some() {
-            warn!(
-                interface = %self.interface,
-                role = ?self.role,
-                "start requested while process handle already exists"
-            );
+            warn!("start requested while process handle already exists");
         }
 
         let mut args = vec![
@@ -183,12 +188,7 @@ impl PtpInstance {
             args.push("-s".to_string());
         }
 
-        debug!(
-            interface = %self.interface,
-            role = ?self.role,
-            args = ?args,
-            "starting ptp4l process"
-        );
+        debug!(args = ?args, "starting ptp4l process");
 
         let child = process::Command::new("ptp4l")
             .args(&args)
@@ -200,12 +200,7 @@ impl PtpInstance {
 
         self.process = Some(child);
 
-        info!(
-            interface = %self.interface,
-            role = ?self.role,
-            pid,
-            "started ptp4l process"
-        );
+        info!(pid, "started ptp4l process");
 
         Ok(())
     }
@@ -215,23 +210,17 @@ impl PtpInstance {
     /// # Errors
     /// Returns an error if the process exists but cannot be terminated.
     pub fn stop(&mut self) -> io::Result<()> {
+        let span = info_span!("stop", role = ?self.role, interface = %self.interface);
+        let _enter = span.enter();
+
         if let Some(mut child) = self.process.take() {
             let pid = child.id();
             child.kill()?;
             let _ = child.wait();
 
-            info!(
-                interface = %self.interface,
-                role = ?self.role,
-                pid,
-                "stopped ptp4l process"
-            );
+            info!(pid, "stopped ptp4l process");
         } else {
-            debug!(
-                interface = %self.interface,
-                role = ?self.role,
-                "stop requested but no running process was tracked"
-            );
+            debug!("stop requested but no running process was tracked");
         }
 
         Ok(())
@@ -252,9 +241,11 @@ impl PtpInstance {
     /// - the process exits with a non-zero status
     /// - the output cannot be parsed into a valid snapshot
     pub fn snapshot(&self) -> Result<PtpSnapshot, PtpQueryError> {
+        let span = info_span!("snapshot", role = ?self.role, interface = %self.interface);
+        let _enter = span.enter();
+
         trace!(
-            interface = %self.interface,
-            role = ?self.role,
+            target: SNAPSHOT_POLL_LOG_TARGET,
             config_path = %self.config_path.display(),
             "querying PTP snapshot via pmc"
         );
@@ -272,48 +263,31 @@ impl PtpInstance {
             ])
             .output()
             .map_err(|error| {
-                warn!(
-                    interface = %self.interface,
-                    role = ?self.role,
-                    error = %error,
-                    "failed to execute pmc"
-                );
+                warn!(error = %error, "failed to execute pmc");
                 PtpQueryError::Io(error)
             })?;
 
         if !output.status.success() {
-            warn!(
-                interface = %self.interface,
-                role = ?self.role,
-                status = %output.status,
-                "pmc exited with non-zero status"
-            );
+            warn!(status = %output.status, "pmc exited with non-zero status");
             return Err(PtpQueryError::CommandFailed(output.status));
         }
 
         let text = String::from_utf8(output.stdout).map_err(|error| {
-            warn!(
-                interface = %self.interface,
-                role = ?self.role,
-                error = %error,
-                "pmc output was not valid UTF-8"
-            );
+            warn!(error = %error, "pmc output was not valid UTF-8");
             PtpQueryError::InvalidUtf8(error)
         })?;
 
-        let snapshot = PtpSnapshot::parse_pmc_output(&text).map_err(|error| {
-            warn!(
-                interface = %self.interface,
-                role = ?self.role,
-                error = %error,
-                "failed to parse pmc output"
-            );
-            PtpQueryError::Parse(error)
-        })?;
+        let snapshot = match PtpSnapshot::parse_pmc_output(&text) {
+            Ok(snapshot) => snapshot,
+            Err(SnapshotParseError::MissingDataset(dataset)) => return Err(PtpQueryError::NotReady(dataset)),
+            Err(error) => {
+                warn!(error = %error, "failed to parse pmc output");
+                return Err(PtpQueryError::Parse(error));
+            }
+        };
 
         trace!(
-            interface = %self.interface,
-            role = ?self.role,
+            target: SNAPSHOT_POLL_LOG_TARGET,
             synchronized = snapshot.is_synchronized(),
             state = ?snapshot.port_data.port_state,
             "PTP snapshot collected"
@@ -325,6 +299,9 @@ impl PtpInstance {
 
 impl Drop for PtpInstance {
     fn drop(&mut self) {
+        let span = info_span!("drop", role = ?self.role, interface = %self.interface);
+        let _enter = span.enter();
+
         // Best effort cleanup, no panics
 
         // Stop process if still running
@@ -334,21 +311,10 @@ impl Drop for PtpInstance {
             match child.kill() {
                 Ok(()) => {
                     let _ = child.wait();
-                    debug!(
-                        interface = %self.interface,
-                        role = ?self.role,
-                        pid,
-                        "killed ptp4l process during drop"
-                    );
+                    debug!(pid, "killed ptp4l process during drop");
                 }
                 Err(error) => {
-                    warn!(
-                        interface = %self.interface,
-                        role = ?self.role,
-                        pid,
-                        error = %error,
-                        "failed to kill ptp4l process during drop"
-                    );
+                    warn!(pid, error = %error, "failed to kill ptp4l process during drop");
                 }
             }
         }
@@ -356,22 +322,11 @@ impl Drop for PtpInstance {
         // Remove the temporary config file
         match std::fs::remove_file(&self.config_path) {
             Ok(()) => {
-                trace!(
-                    interface = %self.interface,
-                    role = ?self.role,
-                    config_path = %self.config_path.display(),
-                    "removed temporary ptp4l configuration"
-                );
+                trace!(config_path = %self.config_path.display(), "removed temporary ptp4l configuration");
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
-                warn!(
-                    interface = %self.interface,
-                    role = ?self.role,
-                    config_path = %self.config_path.display(),
-                    error = %error,
-                    "failed to remove temporary ptp4l configuration"
-                );
+                warn!(config_path = %self.config_path.display(), error = %error, "failed to remove temporary ptp4l configuration");
             }
         }
     }
