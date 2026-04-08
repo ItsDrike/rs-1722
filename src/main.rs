@@ -177,7 +177,7 @@ fn handle_slave_snapshot(slave: &mut PtpInstance, state: &mut MonitorState, warn
 
             state.last_slave_process_down_log = None;
 
-            on_slave_snapshot(&snapshot, state, warn_on_unsync)
+            state.on_slave_snapshot(&snapshot, warn_on_unsync)
         }
         Err(PtpQueryError::NotReady(dataset)) => {
             if state.last_slave_process_down_log.is_some() {
@@ -211,7 +211,10 @@ fn handle_slave_snapshot(slave: &mut PtpInstance, state: &mut MonitorState, warn
             if state.last_slave_process_down_log.is_none() {
                 error!(status = %status, "slave ptp4l process exited unexpectedly");
                 state.last_slave_process_down_log = Some(Instant::now());
-            } else if should_emit_periodic(&mut state.last_slave_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+            } else if MonitorState::should_emit_periodic(
+                &mut state.last_slave_process_down_log,
+                DEGRADED_STATUS_LOG_INTERVAL,
+            ) {
                 warn!(
                     status = %status,
                     "slave ptp4l process remains down; no auto-restart configured"
@@ -227,7 +230,10 @@ fn handle_slave_snapshot(slave: &mut PtpInstance, state: &mut MonitorState, warn
             if state.last_slave_process_down_log.is_none() {
                 error!("slave ptp4l process not running");
                 state.last_slave_process_down_log = Some(Instant::now());
-            } else if should_emit_periodic(&mut state.last_slave_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+            } else if MonitorState::should_emit_periodic(
+                &mut state.last_slave_process_down_log,
+                DEGRADED_STATUS_LOG_INTERVAL,
+            ) {
                 warn!("slave ptp4l process not running");
             }
 
@@ -242,23 +248,47 @@ fn handle_slave_snapshot(slave: &mut PtpInstance, state: &mut MonitorState, warn
     }
 }
 
-/// Updates slave synchronization state and emits transition-aware logs.
-///
-/// Returns `true` when the provided snapshot is synchronized.
-fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_unsync: bool) -> bool {
-    if state.last_slave_pending_log.is_some() {
-        debug!("slave snapshot became available");
-        state.last_slave_pending_log = None;
+impl MonitorState {
+    /// Updates slave synchronization state and emits transition-aware logs.
+    ///
+    /// Returns `true` when the provided snapshot is synchronized.
+    fn on_slave_snapshot(&mut self, snapshot: &PtpSnapshot, warn_on_unsync: bool) -> bool {
+        if self.last_slave_pending_log.is_some() {
+            debug!("slave snapshot became available");
+            self.last_slave_pending_log = None;
+        }
+
+        let current_state = &snapshot.port_data.port_state;
+        let previous_state = self.last_slave_port_state.clone();
+        let state_changed = previous_state.as_ref() != Some(current_state);
+
+        if snapshot.is_synchronized() {
+            self.on_synchronized_slave_snapshot(
+                snapshot,
+                warn_on_unsync,
+                current_state,
+                previous_state.as_ref(),
+                state_changed,
+            );
+            return true;
+        }
+
+        self.on_unsynchronized_slave_snapshot(warn_on_unsync, current_state, previous_state.as_ref(), state_changed);
+        false
     }
 
-    let current_state = &snapshot.port_data.port_state;
-    let previous_state = state.last_slave_port_state.as_ref();
-    let state_changed = previous_state != Some(current_state);
-
-    if snapshot.is_synchronized() {
+    /// Applies the synchronized-path logging and state updates for a slave snapshot.
+    fn on_synchronized_slave_snapshot(
+        &mut self,
+        snapshot: &PtpSnapshot,
+        warn_on_unsync: bool,
+        current_state: &PortState,
+        previous_state: Option<&PortState>,
+        state_changed: bool,
+    ) {
         let offset = snapshot.offset_ns().unwrap_or(0);
 
-        if state.slave_sync_state != SlaveSyncState::Synchronized {
+        if self.slave_sync_state != SlaveSyncState::Synchronized {
             if warn_on_unsync {
                 info!("slave clock is now synchronized");
             } else {
@@ -267,25 +297,8 @@ fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_u
         }
 
         if state_changed {
-            if let Some(previous_state) = previous_state {
-                debug!(
-                    previous_state = ?previous_state,
-                    state = ?current_state,
-                    offset_ns = offset,
-                    gm_identity = %snapshot.time_status.gm_identity,
-                    "slave state changed"
-                );
-            } else {
-                debug!(
-                    previous_state = "unobserved",
-                    state = ?current_state,
-                    offset_ns = offset,
-                    gm_identity = %snapshot.time_status.gm_identity,
-                    "slave state changed"
-                );
-            }
-
-            state.last_slave_port_state = Some(current_state.clone());
+            Self::log_synchronized_slave_state_change(snapshot, current_state, previous_state, offset);
+            self.last_slave_port_state = Some(current_state.clone());
         } else if warn_on_unsync {
             debug!(
                 offset_ns = offset,
@@ -294,135 +307,242 @@ fn on_slave_snapshot(snapshot: &PtpSnapshot, state: &mut MonitorState, warn_on_u
             );
         }
 
-        state.slave_sync_state = SlaveSyncState::Synchronized;
-        state.last_slave_unsync_log = None;
-        true
-    } else {
-        if warn_on_unsync && state.slave_sync_state == SlaveSyncState::Synchronized {
-            warn!(state = ?current_state, "slave clock is not synchronized");
-            state.last_slave_unsync_log = Some(Instant::now());
-        } else if warn_on_unsync
-            && should_emit_periodic(&mut state.last_slave_unsync_log, DEGRADED_STATUS_LOG_INTERVAL)
-        {
-            debug!(state = ?current_state, "slave remains unsynchronized");
-        } else if !warn_on_unsync && state.slave_sync_state != SlaveSyncState::Unsynchronized {
-            debug!(state = ?current_state, "waiting for initial slave synchronization");
+        self.slave_sync_state = SlaveSyncState::Synchronized;
+        self.last_slave_unsync_log = None;
+    }
+
+    /// Emits the transition log for a slave snapshot that is currently synchronized.
+    fn log_synchronized_slave_state_change(
+        snapshot: &PtpSnapshot,
+        current_state: &PortState,
+        previous_state: Option<&PortState>,
+        offset: i64,
+    ) {
+        if let Some(previous_state) = previous_state {
+            debug!(
+                previous_state = ?previous_state,
+                state = ?current_state,
+                offset_ns = offset,
+                gm_identity = %snapshot.time_status.gm_identity,
+                "slave state changed"
+            );
+        } else {
+            debug!(
+                previous_state = "unobserved",
+                state = ?current_state,
+                offset_ns = offset,
+                gm_identity = %snapshot.time_status.gm_identity,
+                "slave state changed"
+            );
         }
+    }
+
+    /// Applies the unsynchronized-path logging and state updates for a slave snapshot.
+    fn on_unsynchronized_slave_snapshot(
+        &mut self,
+        warn_on_unsync: bool,
+        current_state: &PortState,
+        previous_state: Option<&PortState>,
+        state_changed: bool,
+    ) {
+        let unexpected_state = current_state.is_unexpected_for_slave();
+
+        self.log_unsynchronized_slave_status(warn_on_unsync, current_state, unexpected_state, state_changed);
 
         if state_changed {
-            if let Some(previous_state) = previous_state {
-                debug!(previous_state = ?previous_state, state = ?current_state, "slave state changed");
-            } else {
-                debug!(previous_state = "unobserved", state = ?current_state, "slave state changed");
-            }
-
-            state.last_slave_port_state = Some(current_state.clone());
+            Self::log_unsynchronized_slave_state_change(previous_state, current_state, unexpected_state);
+            self.last_slave_port_state = Some(current_state.clone());
         }
 
-        state.slave_sync_state = SlaveSyncState::Unsynchronized;
-        false
+        self.slave_sync_state = SlaveSyncState::Unsynchronized;
+    }
+
+    /// Emits the periodic or transitional status log for an unsynchronized slave.
+    fn log_unsynchronized_slave_status(
+        &mut self,
+        warn_on_unsync: bool,
+        current_state: &PortState,
+        unexpected_state: bool,
+        state_changed: bool,
+    ) {
+        if unexpected_state && state_changed {
+            return;
+        }
+
+        if warn_on_unsync && self.slave_sync_state == SlaveSyncState::Synchronized {
+            warn!(state = ?current_state, "slave clock is not synchronized");
+            self.last_slave_unsync_log = Some(Instant::now());
+            return;
+        }
+
+        if warn_on_unsync && Self::should_emit_periodic(&mut self.last_slave_unsync_log, DEGRADED_STATUS_LOG_INTERVAL)
+        {
+            if unexpected_state {
+                warn!(state = ?current_state, "slave remains in unexpected unsynchronized state");
+            } else {
+                debug!(state = ?current_state, "slave remains unsynchronized");
+            }
+
+            return;
+        }
+
+        if !warn_on_unsync && self.slave_sync_state != SlaveSyncState::Unsynchronized {
+            if unexpected_state {
+                warn!(state = ?current_state, "unexpected slave state while waiting for initial synchronization");
+            } else {
+                debug!(state = ?current_state, "waiting for initial slave synchronization");
+            }
+        }
+    }
+
+    /// Emits a slave state transition log while the slave is unsynchronized.
+    fn log_unsynchronized_slave_state_change(
+        previous_state: Option<&PortState>,
+        current_state: &PortState,
+        unexpected_state: bool,
+    ) {
+        if let Some(previous_state) = previous_state {
+            if unexpected_state {
+                warn!(
+                    previous_state = ?previous_state,
+                    state = ?current_state,
+                    "slave state changed to unexpected value"
+                );
+            } else {
+                debug!(previous_state = ?previous_state, state = ?current_state, "slave state changed");
+            }
+
+            return;
+        }
+
+        if unexpected_state {
+            warn!(
+                previous_state = "unobserved",
+                state = ?current_state,
+                "slave state changed to unexpected value"
+            );
+        } else {
+            debug!(previous_state = "unobserved", state = ?current_state, "slave state changed");
+        }
+    }
+
+    /// Records a successful master snapshot and logs any state transition.
+    fn on_master_snapshot_ok(&mut self, snapshot: &PtpSnapshot) {
+        if self.last_master_process_down_log.is_some() {
+            info!("master ptp4l process became reachable again");
+        }
+
+        self.last_master_process_down_log = None;
+
+        if self.last_master_pending_log.is_some() {
+            debug!("master snapshot became available");
+            self.last_master_pending_log = None;
+        }
+
+        let current_state = &snapshot.port_data.port_state;
+        let unexpected_state = current_state.is_unexpected_for_master();
+        match self.last_master_port_state.as_ref() {
+            Some(previous_state) if previous_state != current_state => {
+                if unexpected_state {
+                    warn!(
+                        previous_state = ?previous_state,
+                        state = ?current_state,
+                        "master state changed to unexpected value"
+                    );
+                } else {
+                    debug!(previous_state = ?previous_state, state = ?current_state, "master state changed");
+                }
+            }
+            None => {
+                if unexpected_state {
+                    warn!(state = ?current_state, "master initial state is unexpected");
+                } else {
+                    debug!(state = ?current_state, "master initial state observed");
+                }
+            }
+            _ => {}
+        }
+
+        self.last_master_port_state = Some(current_state.clone());
+    }
+
+    /// Handles the case where the master `pmc` snapshot is temporarily incomplete.
+    fn on_master_snapshot_not_ready(&mut self, dataset: &'static str) {
+        if self.last_master_process_down_log.is_some() {
+            info!("master ptp4l process became reachable again");
+        }
+
+        self.last_master_process_down_log = None;
+
+        if self.last_master_pending_log.is_none() {
+            if self.last_master_port_state.is_some() {
+                warn!(missing_dataset = dataset, "master snapshot unavailable after startup");
+            } else {
+                debug!(
+                    missing_dataset = dataset,
+                    "master snapshot not ready yet; waiting for ptp4l startup"
+                );
+            }
+
+            self.last_master_pending_log = Some(Instant::now());
+        } else if Self::should_emit_periodic(&mut self.last_master_pending_log, DEGRADED_STATUS_LOG_INTERVAL) {
+            if self.last_master_port_state.is_some() {
+                warn!(missing_dataset = dataset, "master snapshot still unavailable");
+            } else {
+                debug!(
+                    missing_dataset = dataset,
+                    "master snapshot still not ready during startup"
+                );
+            }
+        }
+    }
+
+    /// Emits degraded-status logs when the master `ptp4l` process is down.
+    fn on_master_process_down(&mut self, status: Option<process::ExitStatus>) {
+        self.last_master_pending_log = None;
+
+        if self.last_master_process_down_log.is_none() {
+            if let Some(status) = status {
+                error!(status = %status, "master ptp4l process exited unexpectedly");
+            } else {
+                error!("master ptp4l process not running");
+            }
+
+            self.last_master_process_down_log = Some(Instant::now());
+        } else if Self::should_emit_periodic(&mut self.last_master_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
+            if let Some(status) = status {
+                warn!(status = %status, "master ptp4l process not running");
+            } else {
+                warn!("master ptp4l process not running");
+            }
+        }
+    }
+
+    /// Returns whether enough time has elapsed to emit another periodic log.
+    fn should_emit_periodic(last_emitted: &mut Option<Instant>, interval: Duration) -> bool {
+        let now = Instant::now();
+
+        match last_emitted {
+            Some(previous) if now.duration_since(*previous) < interval => false,
+            _ => {
+                *last_emitted = Some(now);
+                true
+            }
+        }
     }
 }
 
 /// Collects and logs one master snapshot with reduced verbosity.
 fn handle_master_snapshot(master: &mut PtpInstance, state: &mut MonitorState) {
     match master.snapshot() {
-        Ok(snapshot) => on_master_snapshot_ok(&snapshot, state),
-        Err(PtpQueryError::NotReady(dataset)) => on_master_snapshot_not_ready(state, dataset),
-        Err(PtpQueryError::ProcessExited(status)) => on_master_process_down(state, Some(status)),
-        Err(PtpQueryError::ProcessNotRunning) => on_master_process_down(state, None),
+        Ok(snapshot) => state.on_master_snapshot_ok(&snapshot),
+        Err(PtpQueryError::NotReady(dataset)) => state.on_master_snapshot_not_ready(dataset),
+        Err(PtpQueryError::ProcessExited(status)) => state.on_master_process_down(Some(status)),
+        Err(PtpQueryError::ProcessNotRunning) => state.on_master_process_down(None),
         Err(error) => {
             state.last_master_process_down_log = None;
             state.last_master_pending_log = None;
             error!(error = %error, "failed to collect master snapshot");
-        }
-    }
-}
-
-fn on_master_snapshot_ok(snapshot: &PtpSnapshot, state: &mut MonitorState) {
-    if state.last_master_process_down_log.is_some() {
-        info!("master ptp4l process became reachable again");
-    }
-
-    state.last_master_process_down_log = None;
-
-    if state.last_master_pending_log.is_some() {
-        debug!("master snapshot became available");
-        state.last_master_pending_log = None;
-    }
-
-    let current_state = &snapshot.port_data.port_state;
-    match state.last_master_port_state.as_ref() {
-        Some(previous_state) if previous_state != current_state => {
-            debug!(previous_state = ?previous_state, state = ?current_state, "master state changed");
-        }
-        None => {
-            debug!(state = ?current_state, "master initial state observed");
-        }
-        _ => {}
-    }
-
-    state.last_master_port_state = Some(current_state.clone());
-}
-
-fn on_master_snapshot_not_ready(state: &mut MonitorState, dataset: &'static str) {
-    if state.last_master_process_down_log.is_some() {
-        info!("master ptp4l process became reachable again");
-    }
-
-    state.last_master_process_down_log = None;
-
-    if state.last_master_pending_log.is_none() {
-        if state.last_master_port_state.is_some() {
-            warn!(missing_dataset = dataset, "master snapshot unavailable after startup");
-        } else {
-            debug!(
-                missing_dataset = dataset,
-                "master snapshot not ready yet; waiting for ptp4l startup"
-            );
-        }
-
-        state.last_master_pending_log = Some(Instant::now());
-    } else if should_emit_periodic(&mut state.last_master_pending_log, DEGRADED_STATUS_LOG_INTERVAL) {
-        if state.last_master_port_state.is_some() {
-            warn!(missing_dataset = dataset, "master snapshot still unavailable");
-        } else {
-            debug!(
-                missing_dataset = dataset,
-                "master snapshot still not ready during startup"
-            );
-        }
-    }
-}
-
-fn on_master_process_down(state: &mut MonitorState, status: Option<process::ExitStatus>) {
-    state.last_master_pending_log = None;
-
-    if state.last_master_process_down_log.is_none() {
-        if let Some(status) = status {
-            error!(status = %status, "master ptp4l process exited unexpectedly");
-        } else {
-            error!("master ptp4l process not running");
-        }
-
-        state.last_master_process_down_log = Some(Instant::now());
-    } else if should_emit_periodic(&mut state.last_master_process_down_log, DEGRADED_STATUS_LOG_INTERVAL) {
-        if let Some(status) = status {
-            warn!(status = %status, "master ptp4l process not running");
-        } else {
-            warn!("master ptp4l process not running");
-        }
-    }
-}
-
-fn should_emit_periodic(last_emitted: &mut Option<Instant>, interval: Duration) -> bool {
-    let now = Instant::now();
-
-    match last_emitted {
-        Some(previous) if now.duration_since(*previous) < interval => false,
-        _ => {
-            *last_emitted = Some(now);
-            true
         }
     }
 }

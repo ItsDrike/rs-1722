@@ -1,8 +1,8 @@
 use std::{
     fs::File,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::PathBuf,
-    process,
+    process, thread,
 };
 use thiserror::Error;
 use tracing::{debug, info, info_span, trace, warn};
@@ -13,6 +13,23 @@ use crate::{
 };
 
 const SNAPSHOT_POLL_LOG_TARGET: &str = "rs_1722::ptp::snapshot_poll";
+const PTP4L_LOG_TARGET: &str = "rs_1722::ptp::ptp4l";
+
+#[derive(Debug, Clone, Copy)]
+enum Ptp4lOutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl Ptp4lOutputStream {
+    /// Returns the human-readable name of this `ptp4l` output stream.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PtpQueryError {
@@ -94,6 +111,7 @@ pub enum PtpRole {
 /// - `CAP_SYS_TIME`
 #[derive(Debug)]
 pub struct PtpInstance {
+    name: String,
     interface: NetworkInterface,
     role: PtpRole,
     config_path: PathBuf,
@@ -125,6 +143,7 @@ impl PtpInstance {
         );
 
         Ok(Self {
+            name: name.to_string(),
             interface,
             role,
             config_path,
@@ -198,19 +217,125 @@ impl PtpInstance {
 
         debug!(args = ?args, "starting ptp4l process");
 
-        let child = process::Command::new("ptp4l")
+        let mut child = process::Command::new("ptp4l")
             .args(&args)
-            .stdout(process::Stdio::null())
-            .stderr(process::Stdio::null())
+            .stdout(process::Stdio::piped())
+            .stderr(process::Stdio::piped())
             .spawn()?;
 
         let pid = child.id();
+
+        if let Err(error) = self.attach_ptp4l_log_threads(&mut child, pid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
 
         self.process = Some(child);
 
         info!(pid, "started ptp4l process");
 
         Ok(())
+    }
+
+    /// Attaches background log-forwarding threads to the child process streams.
+    ///
+    /// # Errors
+    /// Returns an error if a piped stream is unavailable or if a thread fails to spawn.
+    fn attach_ptp4l_log_threads(&self, child: &mut process::Child, pid: u32) -> io::Result<()> {
+        let Some(stdout) = child.stdout.take() else {
+            return Err(io::Error::other("ptp4l stdout stream is not available"));
+        };
+
+        self.spawn_ptp4l_stream_logger(stdout, pid, Ptp4lOutputStream::Stdout)?;
+
+        let Some(stderr) = child.stderr.take() else {
+            return Err(io::Error::other("ptp4l stderr stream is not available"));
+        };
+
+        self.spawn_ptp4l_stream_logger(stderr, pid, Ptp4lOutputStream::Stderr)
+    }
+
+    /// Spawns a background thread that forwards one `ptp4l` output stream into tracing.
+    ///
+    /// # Errors
+    /// Returns an error if the logging thread cannot be spawned.
+    fn spawn_ptp4l_stream_logger<T>(&self, stream: T, pid: u32, stream_kind: Ptp4lOutputStream) -> io::Result<()>
+    where
+        T: io::Read + Send + 'static,
+    {
+        let instance_name = self.name.clone();
+        let thread_name = format!("ptp4l-{instance_name}-{}", stream_kind.as_str());
+
+        thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                Self::stream_ptp4l_output(stream, stream_kind, pid);
+            })
+            .map(|_| ())
+    }
+
+    /// Reads one `ptp4l` process stream line-by-line and re-emits it through tracing.
+    fn stream_ptp4l_output<T>(stream: T, stream_kind: Ptp4lOutputStream, pid: u32)
+    where
+        T: io::Read,
+    {
+        let mut reader = io::BufReader::new(stream);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let message = line.trim_end_matches(['\r', '\n']);
+                    if message.is_empty() {
+                        continue;
+                    }
+
+                    match stream_kind {
+                        Ptp4lOutputStream::Stdout => {
+                            trace!(target: PTP4L_LOG_TARGET, line = message, "ptp4l");
+                        }
+                        Ptp4lOutputStream::Stderr => {
+                            warn!(target: PTP4L_LOG_TARGET, line = message, "ptp4l");
+                        }
+                    }
+                }
+                Err(error) => {
+                    match stream_kind {
+                        Ptp4lOutputStream::Stdout => {
+                            warn!(
+                                target: PTP4L_LOG_TARGET,
+                                pid,
+                                error = %error,
+                                "failed to read ptp4l output stream"
+                            );
+                        }
+                        Ptp4lOutputStream::Stderr => {
+                            warn!(
+                                target: PTP4L_LOG_TARGET,
+                                pid,
+                                error = %error,
+                                "failed to read ptp4l output stream"
+                            );
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        match stream_kind {
+            Ptp4lOutputStream::Stdout => {
+                trace!(target: PTP4L_LOG_TARGET, pid, "ptp4l output stream closed");
+            }
+            Ptp4lOutputStream::Stderr => {
+                trace!(target: PTP4L_LOG_TARGET, pid, "ptp4l output stream closed");
+            }
+        }
     }
 
     /// Stops the running `ptp4l` process, if any.

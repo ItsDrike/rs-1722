@@ -54,6 +54,24 @@ impl PortState {
             s => Self::Unknown(s.to_owned()),
         }
     }
+
+    /// Returns whether this state is anomalous for a slave instance.
+    #[must_use]
+    pub const fn is_unexpected_for_slave(&self) -> bool {
+        matches!(
+            self,
+            Self::Faulty | Self::Disabled | Self::PreMaster | Self::Master | Self::Passive | Self::Unknown(_)
+        )
+    }
+
+    /// Returns whether this state is anomalous for a master instance.
+    #[must_use]
+    pub const fn is_unexpected_for_master(&self) -> bool {
+        matches!(
+            self,
+            Self::Faulty | Self::Disabled | Self::Uncalibrated | Self::Passive | Self::Slave | Self::Unknown(_)
+        )
+    }
 }
 
 /// Represents the `TIME_STATUS_NP` dataset.

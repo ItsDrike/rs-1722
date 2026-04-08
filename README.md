@@ -15,10 +15,17 @@ running this program.
 
 The project uses `tracing` with `tracing-subscriber` for structured logging.
 
-Default filtering is set to `info,rs_1722=debug`. You can override this with the `RUST_LOG` environment variable:
+Default filtering is `info,rs_1722=debug`. Override it with `RUST_LOG`.
+
+Configurable filters:
+
+- global default: `info`
+- application logs: `rs_1722=debug`
+- `pmc` snapshot polling: `rs_1722::ptp::snapshot_poll`
+- forwarded `ptp4l` process logs: `rs_1722::ptp::ptp4l` (stdout is emitted at `TRACE`, stderr at `WARN`)
+
+Example:
 
 ```bash
-RUST_LOG=debug cargo run
-RUST_LOG=rs_1722=trace cargo run
-RUST_LOG='info,rs_1722=trace,rs_1722::ptp::snapshot_poll=off' cargo run
+RUST_LOG='info,rs_1722=trace,rs_1722::ptp::snapshot_poll=off,rs_1722::ptp::ptp4l=warn' cargo run
 ```
