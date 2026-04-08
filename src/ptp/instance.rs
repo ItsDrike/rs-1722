@@ -5,7 +5,7 @@ use std::{
     process, thread,
 };
 use thiserror::Error;
-use tracing::{debug, info, info_span, trace, warn};
+use tracing::{debug, error, info, info_span, trace, warn};
 
 use crate::{
     net::interface::NetworkInterface,
@@ -31,10 +31,20 @@ impl Ptp4lOutputStream {
     }
 }
 
+fn wrap_command_error(program: &str, error: io::Error) -> io::Error {
+    let message = if error.kind() == io::ErrorKind::NotFound {
+        format!("failed to execute `{program}`: command not found")
+    } else {
+        format!("failed to execute `{program}`: {error}")
+    };
+
+    io::Error::new(error.kind(), message)
+}
+
 #[derive(Debug, Error)]
 pub enum PtpQueryError {
-    /// Failed to execute the `pmc` process.
-    #[error("failed to execute pmc: {0}")]
+    /// I/O or process-management error while interacting with PTP helper processes.
+    #[error(transparent)]
     Io(std::io::Error),
 
     /// `pmc` exited with a non-zero status.
@@ -192,7 +202,7 @@ impl PtpInstance {
     /// If the role is [`PtpRole::Slave`], the `-s` flag is included.
     ///
     /// # Errors
-    /// Returns an error if the process cannot be spawned.
+    /// Returns an error if the `ptp4l` process cannot be spawned.
     pub fn start(&mut self) -> io::Result<()> {
         let span = info_span!("start", role = ?self.role, interface = %self.interface);
         let _enter = span.enter();
@@ -215,17 +225,28 @@ impl PtpInstance {
             args.push("-s".to_string());
         }
 
-        debug!(args = ?args, "starting ptp4l process");
+        debug!(program = "ptp4l", args = ?args, "spawning ptp4l process");
 
         let mut child = process::Command::new("ptp4l")
             .args(&args)
             .stdout(process::Stdio::piped())
             .stderr(process::Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|error| {
+                error!(
+                    program = "ptp4l",
+                    args = ?args,
+                    error = %error,
+                    "failed to spawn ptp4l process"
+                );
+
+                wrap_command_error("ptp4l", error)
+            })?;
 
         let pid = child.id();
 
         if let Err(error) = self.attach_ptp4l_log_threads(&mut child, pid) {
+            error!(pid, program = "ptp4l", error = %error, "failed to attach ptp4l log forwarding");
             let _ = child.kill();
             let _ = child.wait();
             return Err(error);
@@ -233,7 +254,7 @@ impl PtpInstance {
 
         self.process = Some(child);
 
-        info!(pid, "started ptp4l process");
+        info!(pid, program = "ptp4l", "started ptp4l process");
 
         Ok(())
     }
@@ -381,33 +402,50 @@ impl PtpInstance {
 
         self.ensure_process_running()?;
 
+        let args = vec![
+            "-u".to_string(),
+            "-b".to_string(),
+            "0".to_string(),
+            "-f".to_string(),
+            self.config_path.to_string_lossy().into_owned(),
+            "GET TIME_STATUS_NP".to_string(),
+            "GET PORT_DATA_SET".to_string(),
+            "GET CURRENT_DATA_SET".to_string(),
+        ];
+
         trace!(
             target: SNAPSHOT_POLL_LOG_TARGET,
+            program = "pmc",
+            args = ?args,
             config_path = %self.config_path.display(),
             "querying PTP snapshot via pmc"
         );
 
-        let output = process::Command::new("pmc")
-            .args([
-                "-u",
-                "-b",
-                "0",
-                "-f",
-                self.config_path.to_string_lossy().as_ref(),
-                "GET TIME_STATUS_NP",
-                "GET PORT_DATA_SET",
-                "GET CURRENT_DATA_SET",
-            ])
-            .output()
-            .map_err(|error| {
-                warn!(error = %error, "failed to execute pmc");
-                PtpQueryError::Io(error)
-            })?;
+        let output = process::Command::new("pmc").args(&args).output().map_err(|error| {
+            warn!(
+                program = "pmc",
+                args = ?args,
+                error = %error,
+                "failed to execute pmc"
+            );
+
+            PtpQueryError::Io(wrap_command_error("pmc", error))
+        })?;
 
         if !output.status.success() {
             self.ensure_process_running()?;
 
-            warn!(status = %output.status, "pmc exited with non-zero status");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = stdout.trim();
+            let stderr = stderr.trim();
+
+            if stdout.is_empty() && stderr.is_empty() {
+                warn!(status = %output.status, "pmc exited with non-zero status");
+            } else {
+                warn!(status = %output.status, stdout = %stdout, stderr = %stderr, "pmc exited with non-zero status");
+            }
+
             return Err(PtpQueryError::CommandFailed(output.status));
         }
 
