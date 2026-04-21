@@ -2,10 +2,12 @@
 // QUADLET: 4 octets, big endian
 //
 
+mod avtpdu;
 mod headers;
 mod stream_id;
 mod subtype;
 
+pub use avtpdu::Avtpdu;
 pub use headers::{AvtpAlternativeHeader, AvtpCommonHeader, AvtpControlHeader, AvtpStreamHeader, HeaderType};
 pub use subtype::{EncapsulationStyle, Subtype, UnknownSubtype};
 

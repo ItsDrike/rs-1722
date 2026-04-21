@@ -161,6 +161,45 @@ impl AvtpStreamHeader {
     pub const fn stream_id_valid(&self) -> bool {
         self.common.header_specific_bit
     }
+
+    pub(crate) fn decode_after_common<R: io::Read>(
+        common: AvtpCommonHeader,
+        reader: &mut BitReader<R, BigEndian>,
+    ) -> io::Result<Self> {
+        // bit aligned
+        let media_clock_restart = reader.read_bit()?;
+        let format_specific_data = reader.read::<2, _>()?;
+        let avtp_timestamp_valid = reader.read_bit()?;
+        let sequence_num = reader.read::<8, _>()?;
+        let format_specific_data_1 = reader.read::<7, _>()?;
+        let timestamp_uncertain = reader.read_bit()?;
+
+        // The rest is byte aligned
+        assert!(reader.byte_aligned());
+
+        let stream_id = StreamID::decode(reader)?;
+        let avtp_timestamp = reader.read_to()?;
+        let format_specific_data_2 = reader.read_to()?;
+        let stream_data_length = reader.read_to()?;
+        let format_specific_data_3 = reader.read_to()?;
+        let stream_data_payload = read_arc(reader, usize::from(stream_data_length))?;
+
+        Ok(Self {
+            common,
+            media_clock_restart,
+            format_specific_data,
+            avtp_timestamp_valid,
+            sequence_num,
+            format_specific_data_1,
+            timestamp_uncertain,
+            stream_id,
+            avtp_timestamp,
+            format_specific_data_2,
+            stream_data_length,
+            format_specific_data_3,
+            stream_data_payload,
+        })
+    }
 }
 
 impl BitEncode for AvtpStreamHeader {
@@ -198,40 +237,9 @@ impl BitDecode for AvtpStreamHeader {
     type Error = IOWrapError<UnknownSubtype>;
 
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
-        // bit aligned
         let common = AvtpCommonHeader::decode(reader)?;
-        let media_clock_restart = reader.read_bit()?;
-        let format_specific_data = reader.read::<2, _>()?;
-        let avtp_timestamp_valid = reader.read_bit()?;
-        let sequence_num = reader.read::<8, _>()?;
-        let format_specific_data_1 = reader.read::<7, _>()?;
-        let timestamp_uncertain = reader.read_bit()?;
-
-        // The rest is byte aligned
-        assert!(reader.byte_aligned());
-
-        let stream_id = StreamID::decode(reader)?;
-        let avtp_timestamp = reader.read_to()?;
-        let format_specific_data_2 = reader.read_to()?;
-        let stream_data_length = reader.read_to()?;
-        let format_specific_data_3 = reader.read_to()?;
-        let stream_data_payload = read_arc(reader, usize::from(stream_data_length))?;
-
-        Ok(Self {
-            common,
-            media_clock_restart,
-            format_specific_data,
-            avtp_timestamp_valid,
-            sequence_num,
-            format_specific_data_1,
-            timestamp_uncertain,
-            stream_id,
-            avtp_timestamp,
-            format_specific_data_2,
-            stream_data_length,
-            format_specific_data_3,
-            stream_data_payload,
-        })
+        let decoded = Self::decode_after_common(common, reader)?;
+        Ok(decoded)
     }
 }
 
@@ -270,6 +278,30 @@ impl AvtpControlHeader {
     pub const fn stream_id_valid(&self) -> bool {
         self.common.header_specific_bit
     }
+
+    pub(crate) fn decode_after_common<R: io::Read>(
+        common: AvtpCommonHeader,
+        reader: &mut BitReader<R, BigEndian>,
+    ) -> io::Result<Self> {
+        // Bit aligned
+        let format_specific_data = reader.read::<9, _>()?;
+        let control_data_length = reader.read::<11, _>()?;
+
+        // The rest is byte aligned
+        assert!(reader.byte_aligned());
+
+        // Byte aligned
+        let stream_id = StreamID::decode(reader)?;
+        let control_data_payload = read_arc(reader, usize::from(control_data_length))?;
+
+        Ok(Self {
+            common,
+            format_specific_data,
+            control_data_length,
+            stream_id,
+            control_data_payload,
+        })
+    }
 }
 
 impl BitEncode for AvtpControlHeader {
@@ -301,29 +333,29 @@ impl BitDecode for AvtpControlHeader {
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
         // Bit aligned
         let common = AvtpCommonHeader::decode(reader)?;
-        let format_specific_data = reader.read::<9, _>()?;
-        let control_data_length = reader.read::<11, _>()?;
-
-        // The rest is byte aligned
-        assert!(reader.byte_aligned());
-
-        // Byte aligned
-        let stream_id = StreamID::decode(reader)?;
-        let control_data_payload = read_arc(reader, usize::from(control_data_length))?;
-
-        Ok(Self {
-            common,
-            format_specific_data,
-            control_data_length,
-            stream_id,
-            control_data_payload,
-        })
+        let decoded = Self::decode_after_common(common, reader)?;
+        Ok(decoded)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 // TODO: This structure is not yet supported
-pub struct AvtpAlternativeHeader {}
+pub struct AvtpAlternativeHeader {
+    /// The preceding common header. See [`AvtpCommonHeader`].
+    ///
+    /// `common.header_specific_bit` maps to `sv` (stream ID valid). See
+    /// [`Self::stream_id_valid`].
+    pub common: AvtpCommonHeader, // 12 bits
+}
+
+impl AvtpAlternativeHeader {
+    pub(crate) fn decode_after_common<R: io::Read>(
+        common: AvtpCommonHeader,
+        reader: &mut BitReader<R, BigEndian>,
+    ) -> io::Result<Self> {
+        todo!()
+    }
+}
 
 impl BitEncode for AvtpAlternativeHeader {
     type Error = io::Error;
