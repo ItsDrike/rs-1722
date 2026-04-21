@@ -1,4 +1,5 @@
-use crate::net::mac_address::MacAddress;
+use pnet::util::MacAddr;
+
 use std::{fmt, fs, io, path::PathBuf};
 
 /// Represents a network interface on the system.
@@ -67,7 +68,7 @@ impl NetworkInterface {
     /// Panics if the kernel-provided MAC address is not in a valid
     /// `xx:xx:xx:xx:xx:xx` format. This should never happen under normal
     /// conditions, as the value is provided by the kernel.
-    pub fn mac_address(&self) -> io::Result<MacAddress> {
+    pub fn mac_address(&self) -> io::Result<MacAddr> {
         let path = self.sysfs_path().join("address");
         let content = fs::read_to_string(path)?;
 

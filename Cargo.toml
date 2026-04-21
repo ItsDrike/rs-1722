@@ -10,15 +10,11 @@ categories = ["network-programming", "multimedia"]
 license = "LGPL-3.0-only"
 
 [dependencies]
+bitstream-io = "4.10.0"
 ctrlc = "3.5.2"
+pnet = "0.35.0"
 thiserror = "2.0.18"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [dev-dependencies]
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-multiple_crate_versions = "allow"
