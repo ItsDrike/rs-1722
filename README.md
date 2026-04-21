@@ -27,5 +27,5 @@ Configurable filters:
 Example:
 
 ```bash
-RUST_LOG='info,rs_1722=trace,rs_1722::ptp::snapshot_poll=off,rs_1722::ptp::ptp4l=warn' cargo run
+RUST_LOG='info,rs_1722=trace,rs_1722::ptp::snapshot_poll=off,rs_1722::ptp::ptp4l=warn' cargo run --bin ptp-syncd
 ```
