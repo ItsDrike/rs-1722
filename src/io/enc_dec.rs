@@ -10,7 +10,7 @@ use bitstream_io::{BigEndian, BitReader, BitWriter};
 ///
 /// This is primarily intended for parsing binary protocols with non-byte-aligned
 /// fields (e.g., AVTP headers).
-pub trait BitDecode: Sized {
+pub(crate) trait BitDecode: Sized {
     /// Error type returned when decoding fails.
     type Error;
 
@@ -31,7 +31,7 @@ pub trait BitDecode: Sized {
 ///
 /// This is primarily intended for serializing binary protocols with non-byte-aligned
 /// fields (e.g., AVTP headers).
-pub trait BitEncode {
+pub(crate) trait BitEncode {
     /// Error type returned when encoding fails.
     type Error;
 

@@ -162,11 +162,27 @@ impl AvtpStreamHeader {
         self.common.header_specific_bit
     }
 
+    /// Decode the Stream Header info from a reader that had already decoded the
+    /// [`AvtpCommonHeader`] header.
+    ///
+    /// This is useful because the common header is generally read first, as it contains data based
+    /// on which the type of header is decided.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be positioned immediately after decoding an [`AvtpCommonHeader`].
+    ///   When decoding begins from a byte-aligned input, this places the reader at a 4-bit offset.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Stream`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// The reader will be in a byte-aligned position after decoding completes.
     pub(crate) fn decode_after_common<R: io::Read>(
         common: AvtpCommonHeader,
         reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
-        assert_eq!(common.subtype.header_type(), HeaderType::Stream);
+        debug_assert_eq!(common.subtype.header_type(), HeaderType::Stream);
 
         // bit aligned
         let media_clock_restart = reader.read_bit()?;
@@ -176,8 +192,9 @@ impl AvtpStreamHeader {
         let format_specific_data_1 = reader.read::<7, _>()?;
         let timestamp_uncertain = reader.read_bit()?;
 
-        // The rest is byte aligned
-        assert!(reader.byte_aligned());
+        // The reader is guaranteed to be byte aligned after this
+        // (assuming it came in unaligned, from after reading the common header)
+        debug_assert!(reader.byte_aligned());
 
         let stream_id = StreamID::decode(reader)?;
         let avtp_timestamp = reader.read_to()?;
@@ -207,8 +224,22 @@ impl AvtpStreamHeader {
 impl BitEncode for AvtpStreamHeader {
     type Error = io::Error;
 
+    /// Encode the Stream Header info.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided writer must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Stream`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// The writer will be in a byte-aligned position after encoding completes.
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
-        assert_eq!(self.common.subtype.header_type(), HeaderType::Stream);
+        debug_assert_eq!(self.common.subtype.header_type(), HeaderType::Stream);
+
+        // We must start with a byte-aligned writer
+        debug_assert!(writer.byte_aligned());
 
         // Bit aligned
         self.common.encode(writer)?;
@@ -219,8 +250,8 @@ impl BitEncode for AvtpStreamHeader {
         writer.write::<7, _>(self.format_specific_data_1)?;
         writer.write_bit(self.timestamp_uncertain)?;
 
-        // The rest is byte aligned
-        assert!(writer.byte_aligned());
+        // The rest of the writes are guaranteed to be byte aligned
+        debug_assert!(writer.byte_aligned());
 
         self.stream_id.encode(writer)?;
         writer.write_from(self.avtp_timestamp)?;
@@ -228,9 +259,9 @@ impl BitEncode for AvtpStreamHeader {
         writer.write_from(self.stream_data_length)?;
         writer.write_from(self.format_specific_data_3)?;
 
-        // TODO: Consider if this debug assert should be a runtime error
-        // This is hot path code though
-        assert_eq!(usize::from(self.stream_data_length), self.stream_data_payload.len());
+        // TODO: Consider if this debug assert should be a runtime error.
+        // This is hot path code though.
+        debug_assert_eq!(usize::from(self.stream_data_length), self.stream_data_payload.len());
         writer.write_bytes(&self.stream_data_payload)?;
 
         Ok(())
@@ -240,9 +271,27 @@ impl BitEncode for AvtpStreamHeader {
 impl BitDecode for AvtpStreamHeader {
     type Error = IOWrapError<UnknownSubtype>;
 
+    /// Decode the Stream Header.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Stream`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// The reader will be in a byte-aligned position after decoding completes.
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
+        // We must start with a byte-aligned reader
+        debug_assert!(reader.byte_aligned());
+
         let common = AvtpCommonHeader::decode(reader)?;
         let decoded = Self::decode_after_common(common, reader)?;
+
+        // The reader is guaranteed to be byte aligned at the end
+        debug_assert!(reader.byte_aligned());
+
         Ok(decoded)
     }
 }
@@ -283,18 +332,35 @@ impl AvtpControlHeader {
         self.common.header_specific_bit
     }
 
+    /// Decode the Control Header info from a reader that had already decoded the
+    /// [`AvtpCommonHeader`] header.
+    ///
+    /// This is useful because the common header is generally read first, as it contains data based
+    /// on which the type of header is decided.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be positioned immediately after decoding an [`AvtpCommonHeader`].
+    ///   When decoding begins from a byte-aligned input, this places the reader at a 4-bit offset.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Control`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// The reader will be in a byte-aligned position after decoding completes.
     pub(crate) fn decode_after_common<R: io::Read>(
         common: AvtpCommonHeader,
         reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
-        assert_eq!(common.subtype.header_type(), HeaderType::Control);
+        debug_assert_eq!(common.subtype.header_type(), HeaderType::Control);
 
         // Bit aligned
         let format_specific_data = reader.read::<9, _>()?;
         let control_data_length = reader.read::<11, _>()?;
 
-        // The rest is byte aligned
-        assert!(reader.byte_aligned());
+        // The reader is guaranteed to be byte aligned after this
+        // (assuming it came in unaligned, from after reading the common header)
+        debug_assert!(reader.byte_aligned());
 
         // Byte aligned
         let stream_id = StreamID::decode(reader)?;
@@ -313,22 +379,37 @@ impl AvtpControlHeader {
 impl BitEncode for AvtpControlHeader {
     type Error = io::Error;
 
+    /// Encode the Control Header info.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided writer must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Control`]
+    ///   subtype.
+    /// - The [`Self::control_data_length`] must match the length of [`Self::control_data_payload`].
+    ///
+    /// # Postconditions
+    ///
+    /// The writer will be in a byte-aligned position after encoding completes.
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
-        assert_eq!(self.common.subtype.header_type(), HeaderType::Control);
+        debug_assert_eq!(self.common.subtype.header_type(), HeaderType::Control);
+
+        // We must start with a byte-aligned writer
+        debug_assert!(writer.byte_aligned());
 
         // Bit aligned
         self.common.encode(writer)?;
         writer.write::<9, _>(self.format_specific_data)?;
         writer.write::<11, _>(self.control_data_length)?;
 
-        // The rest is byte aligned
-        assert!(writer.byte_aligned());
+        // The rest of the writes are guaranteed to be byte aligned
+        debug_assert!(writer.byte_aligned());
 
         self.stream_id.encode(writer)?;
 
-        // TODO: Consider if this debug assert should be a runtime error
-        // This is hot path code though
-        assert_eq!(usize::from(self.control_data_length), self.control_data_payload.len());
+        // TODO: Consider if this debug assert should be a runtime error.
+        // This is hot path code though.
+        debug_assert_eq!(usize::from(self.control_data_length), self.control_data_payload.len());
         writer.write_bytes(&self.control_data_payload)?;
 
         Ok(())
@@ -338,10 +419,27 @@ impl BitEncode for AvtpControlHeader {
 impl BitDecode for AvtpControlHeader {
     type Error = IOWrapError<UnknownSubtype>;
 
+    /// Decode the Control Header.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Control`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// The reader will be in a byte-aligned position after decoding completes.
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
-        // Bit aligned
+        // We must start with a byte-aligned reader
+        debug_assert!(reader.byte_aligned());
+
         let common = AvtpCommonHeader::decode(reader)?;
         let decoded = Self::decode_after_common(common, reader)?;
+
+        // The reader is guaranteed to be byte aligned at the end
+        debug_assert!(reader.byte_aligned());
+
         Ok(decoded)
     }
 }
@@ -366,12 +464,33 @@ pub struct AvtpAlternativeHeader {
 }
 
 impl AvtpAlternativeHeader {
+    /// Decode the Alternative Header info from a reader that had already decoded the
+    /// [`AvtpCommonHeader`] header.
+    ///
+    /// This is useful because the common header is generally read first, as it contains data based
+    /// on which the type of header is decided.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be positioned immediately after decoding an [`AvtpCommonHeader`].
+    ///   When decoding begins from a byte-aligned input, this places the reader at a 4-bit offset.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Alternative`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// - The reader will be in a byte-aligned position after decoding completes.
+    /// - The last nibble (4-bits) of the last byte of [`Self::alternative_data_payload`] will be
+    ///   padding (zeroes) introduced by this implementation. This just reflects the internal
+    ///   structural representation of the payload that follows the 12-bit common header, to end off
+    ///   in a byte-aligned state. This only holds if the payload wasn't empty.
+    ///
     #[expect(clippy::unnecessary_wraps)]
     pub(crate) fn decode_after_common<R: io::Read>(
         common: AvtpCommonHeader,
         _reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
-        assert_eq!(common.subtype.header_type(), HeaderType::Alternative);
+        debug_assert_eq!(common.subtype.header_type(), HeaderType::Alternative);
 
         // The structure of the alternative header differs based on the subtype
         #[expect(unused_variables)]
@@ -412,11 +531,54 @@ impl AvtpAlternativeHeader {
 impl BitEncode for AvtpAlternativeHeader {
     type Error = io::Error;
 
+    /// Encode the Alternative Header info.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided writer must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Alternative`]
+    ///   subtype.
+    /// - The last nibble (4-bits) of the last byte of [`Self::alternative_data_payload`] (if
+    ///   non-empty) must be padding (zeroes). This just reflects the internal structural
+    ///   representation of the payload that follows the 12-bit common header, to end off in a
+    ///   byte-aligned state. (If using [`Self::decode`], this will be guaranteed.)
+    ///
+    /// # Postconditions
+    ///
+    /// The writer will be in a byte-aligned position after encoding completes.
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
-        assert_eq!(self.common.subtype.header_type(), HeaderType::Alternative);
+        debug_assert_eq!(self.common.subtype.header_type(), HeaderType::Alternative);
 
-        self.common.encode(writer)?;
-        writer.write_bytes(&self.alternative_data_payload)?;
+        // We must start with a byte-aligned writer
+        debug_assert!(writer.byte_aligned());
+
+        self.common.encode(writer)?; // 12-bit
+
+        // The logic for writing the payload differs per-subtype at the field level, but overall, it
+        // always ends up byte-aligned. What this means is that we need to write it without the last
+        // 4 bits of the last byte in the stored payload of this struct, as the common header is
+        // 12-bit, so the last nibble in the payload is always just going to be padding with how we
+        // store the data. This padding is an implementation detail.
+        if let Some((last, rest)) = self.alternative_data_payload.split_last() {
+            writer.write_bytes(rest)?;
+
+            debug_assert_eq!(last & 0x0F, 0, "lower nibble must be zero (padding)");
+            let upper_nibble = last >> 4;
+            writer.write::<4, _>(upper_nibble)?;
+        } else {
+            // If the payload is empty, we still need to restore alignment after the 12-bit common
+            // header (by writing 4 zero bits).
+            //
+            // This can only happen if the caller created the alternative_data_payload manually to
+            // be empty. The spec wording does technically allow for alternative_data_payload to
+            // have a length of 0, but the decode function guarantees to return at least 1 byte even
+            // for empty payloads, for the 4-bit zero padding (to byte-align), so this is only
+            // reached if the caller passed in an empty payload manually.
+            writer.byte_align()?;
+        }
+
+        // The writer is guaranteed to be byte aligned at the end
+        debug_assert!(writer.byte_aligned());
 
         Ok(())
     }
@@ -425,10 +587,31 @@ impl BitEncode for AvtpAlternativeHeader {
 impl BitDecode for AvtpAlternativeHeader {
     type Error = IOWrapError<UnknownSubtype>;
 
+    /// Decode the Alternative Header.
+    ///
+    /// # Preconditions
+    ///
+    /// - The provided reader must be byte-aligned.
+    /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Alternative`]
+    ///   subtype.
+    ///
+    /// # Postconditions
+    ///
+    /// - The reader will be in a byte-aligned position after decoding completes.
+    /// - The last nibble (4-bits) of the last byte of [`Self::alternative_data_payload`] will be
+    ///   padding (zeroes) introduced by this implementation. This just reflects the internal
+    ///   structural representation of the payload that follows the 12-bit common header, to end off
+    ///   in a byte-aligned state. This only holds if the payload wasn't empty.
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
-        // Bit aligned
+        // The reader is guaranteed to be byte aligned at the end
+        debug_assert!(reader.byte_aligned());
+
         let common = AvtpCommonHeader::decode(reader)?;
         let decoded = Self::decode_after_common(common, reader)?;
+
+        // The reader is guaranteed to be byte aligned at the end
+        debug_assert!(reader.byte_aligned());
+
         Ok(decoded)
     }
 }
