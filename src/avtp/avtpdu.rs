@@ -3,7 +3,10 @@ use std::io;
 use bitstream_io::{BigEndian, BitReader, BitWrite, BitWriter};
 
 use crate::{
-    avtp::{AvtpAlternativeHeader, AvtpCommonHeader, AvtpControlHeader, AvtpStreamHeader, HeaderType, UnknownSubtype},
+    avtp::{
+        AvtpAlternativeHeader, AvtpCommonHeader, AvtpControlHeader, AvtpStreamHeader, HeaderType, IncompatibleSubtype,
+        Subtype, UnknownSubtype,
+    },
     io::enc_dec::{BitDecode, BitEncode, IOWrapError},
 };
 
@@ -44,12 +47,41 @@ impl BitEncode for Avtpdu {
 
 impl Avtpdu {
     #[must_use]
+    /// Obtain the header type variant for this AVTPDU
     pub const fn header_type(&self) -> HeaderType {
         match self {
             Self::Stream(_) => HeaderType::Stream,
             Self::Control(_) => HeaderType::Control,
             Self::Alternative(_) => HeaderType::Alternative,
         }
+    }
+
+    #[must_use]
+    /// Obtain the common header shared by all AVTPDU header variants
+    pub const fn common_header(&self) -> &AvtpCommonHeader {
+        match self {
+            Self::Stream(h) => &h.common,
+            Self::Control(h) => &h.common,
+            Self::Alternative(h) => &h.common,
+        }
+    }
+
+    #[must_use]
+    /// Obtain the subtype from the common header shared by all AVTPDU header variants
+    pub const fn subtype(&self) -> Subtype {
+        self.common_header().subtype
+    }
+
+    /// Validate that the given Subtype matches the expected header type variant
+    fn validate_subtype(&self) -> Result<(), IncompatibleSubtype> {
+        let subtype = self.subtype();
+        let header_type = self.header_type();
+
+        if subtype.header_type() != header_type {
+            return Err(IncompatibleSubtype { subtype, header_type });
+        }
+
+        Ok(())
     }
 
     /// Encodes this AVTPDU into the provided writer.
@@ -60,16 +92,28 @@ impl Avtpdu {
     ///   desired state (e.g. calling `clear()` when reusing a `Vec<u8>`).
     /// - If you're using a dynamically growing buffer, the recommended initial capacity
     ///   is 1500 bytes (Ethernet MTU) to avoid re-allocs.
-    /// - This method avoids buffer allocation and is preferred in hot paths with many encodes.
-    ///   If you wish to construct the buffer too (with allocation), you can use a short-hand
-    ///   function [`Self::to_bytes`] instead.
     ///
     /// # Errors
     ///
     /// The encoding process can result in an [`io::Error`], if the underlying header encoding
-    /// failed. Depending on the passed writer, and the state of the contained headers, it is
-    /// possible for this to be infallible. The caller is responsible for ensuring this guarantee.
-    pub fn encode_into<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+    /// failed. This is propagated as [`IOWrapError::Io`]. This can happen if:
+    ///
+    /// - The passed writer fails on a write operation due to some external issue.
+    /// - The values inside of the header do not meet the internal consistency expectations for
+    ///   bit-size and cannot be encoded. (E.g. if trying to encode a 3-bit number, represented as a
+    ///   u8 underlying type in Rust, with a value that overflows the 3-bit max - such as 10).
+    ///
+    /// Additionally, if [`Self::subtype`] does not correspond to the [`Self::header_type`], the
+    /// [`IOWrapError::Specific`] variant is returned, with the [`IncompatibleSubtype`] error
+    /// contained.
+    ///
+    /// If the passed writer is a simple buffer, and the caller made sure the internal state is
+    /// consistent with the expected invariants, this can be considered as infallible.
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> Result<(), IOWrapError<IncompatibleSubtype>> {
+        if let Err(exc) = self.validate_subtype() {
+            return Err(IOWrapError::Specific(exc));
+        }
+
         let mut writer = BitWriter::endian(writer, BigEndian);
         self.encode(&mut writer)?;
 
@@ -80,36 +124,15 @@ impl Avtpdu {
         Ok(())
     }
 
-    /// Encodes this AVTPDU into a newly allocated [`Vec`] buffer.
-    ///
-    /// The buffer is preallocated to the Ethernet MTU (1500 bytes) before encode,
-    /// which avoids reallocations for typical AVTP packets.
-    ///
-    /// # Notes
-    ///
-    /// In hot path code which performs many consequent encodes, it is often better to re-use a
-    /// single buffer, as this function will always allocate. See [`Self::encode_into`].
-    ///
-    /// # Errors
-    ///
-    /// The encoding process can result in an [`io::Error`], if the underlying header encoding
-    /// failed. This can only happen if the state of the contained headers doesn't meet certain
-    /// internal consistency expectations for the given header type. If the caller can ensure that
-    /// the contained header is internally consistent, this operation is infallible.
-    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(1500); // Ethernet MTU (Maximum Transmission Unit, payload size)
-        self.encode_into(&mut buf)?;
-        Ok(buf)
-    }
-
     /// Attempts to read (decode) an AVTPDU.
     ///
     /// # Errors
     ///
-    /// The reading process can result in an [`io::Error`], which is returned as [`IOWrapError::Io`]
-    /// err variant. These errors generally come from underlying issues with writing the data.
-    /// Additionally, [`IOWrapError::Specific`] err variant is returned if the packet data were in
-    /// an internally inconsistent state.
+    /// - The reading process can result in an [`io::Error`], which is returned as
+    ///   [`IOWrapError::Io`] err variant. These errors can occur from underlying issues with
+    ///   reading the data using the provided reader.
+    /// - Additionally, [`IOWrapError::Specific`] err variant is returned if the packet data were in
+    ///   an internally inconsistent state, which couldn't be parsed.
     pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, IOWrapError<UnknownSubtype>> {
         let mut reader = BitReader::endian(reader, BigEndian);
         Self::decode(&mut reader)

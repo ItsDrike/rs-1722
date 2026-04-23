@@ -23,6 +23,13 @@ pub enum EncapsulationStyle {
 #[error("unknown subtype: {0}")]
 pub struct UnknownSubtype(pub u8);
 
+#[derive(Debug, Error)]
+#[error("The subtype {subtype} is not compatible with header type {header_type:?}")]
+pub struct IncompatibleSubtype {
+    pub subtype: Subtype,
+    pub header_type: HeaderType,
+}
+
 #[allow(non_camel_case_types)] // We want to stick to the spec names
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
