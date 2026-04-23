@@ -166,6 +166,8 @@ impl AvtpStreamHeader {
         common: AvtpCommonHeader,
         reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
+        assert_eq!(common.subtype.header_type(), HeaderType::Stream);
+
         // bit aligned
         let media_clock_restart = reader.read_bit()?;
         let format_specific_data = reader.read::<2, _>()?;
@@ -206,6 +208,8 @@ impl BitEncode for AvtpStreamHeader {
     type Error = io::Error;
 
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
+        assert_eq!(self.common.subtype.header_type(), HeaderType::Stream);
+
         // Bit aligned
         self.common.encode(writer)?;
         writer.write_bit(self.media_clock_restart)?;
@@ -283,6 +287,8 @@ impl AvtpControlHeader {
         common: AvtpCommonHeader,
         reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
+        assert_eq!(common.subtype.header_type(), HeaderType::Control);
+
         // Bit aligned
         let format_specific_data = reader.read::<9, _>()?;
         let control_data_length = reader.read::<11, _>()?;
@@ -308,6 +314,8 @@ impl BitEncode for AvtpControlHeader {
     type Error = io::Error;
 
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
+        assert_eq!(self.common.subtype.header_type(), HeaderType::Control);
+
         // Bit aligned
         self.common.encode(writer)?;
         writer.write::<9, _>(self.format_specific_data)?;
@@ -339,36 +347,88 @@ impl BitDecode for AvtpControlHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-// TODO: This structure is not yet supported
+/// This header is used by formats that do not conform to the usual control or stream common
+/// headers.
+///
+/// It is designed to be very flexible and allow representing essentially any custom structures by
+/// containing a dynamic payload, which are just prefixed by the common header.
 pub struct AvtpAlternativeHeader {
     /// The preceding common header. See [`AvtpCommonHeader`].
     ///
-    /// `common.header_specific_bit` maps to `sv` (stream ID valid). See
-    /// [`Self::stream_id_valid`].
+    /// `common.header_specific_bit` meaning differs depending on the format that
+    /// use the alternative header.
     pub common: AvtpCommonHeader, // 12 bits
+
+    // The meaning of this field is format-specific.
+    //
+    // The actual implementation is defined by each format that uses the alternative header.
+    pub alternative_data_payload: Arc<[u8]>,
 }
 
 impl AvtpAlternativeHeader {
+    #[expect(clippy::unnecessary_wraps)]
     pub(crate) fn decode_after_common<R: io::Read>(
         common: AvtpCommonHeader,
-        reader: &mut BitReader<R, BigEndian>,
+        _reader: &mut BitReader<R, BigEndian>,
     ) -> io::Result<Self> {
-        todo!()
+        assert_eq!(common.subtype.header_type(), HeaderType::Alternative);
+
+        // The structure of the alternative header differs based on the subtype
+        #[expect(unused_variables)]
+        let alternative_data_payload = match common.subtype {
+            Subtype::IEC_61883_IIDC
+            | Subtype::MMA_STREAM
+            | Subtype::AAF
+            | Subtype::CVF
+            | Subtype::TSCF
+            | Subtype::SVF
+            | Subtype::RVF
+            | Subtype::VSF_STREAM
+            | Subtype::EF_STREAM
+            | Subtype::ADP
+            | Subtype::AECP
+            | Subtype::ACMP
+            | Subtype::MAAP
+            | Subtype::EF_CONTROL => {
+                unreachable!("Not an alternatvie header: {0}", common.subtype)
+            }
+
+            Subtype::CRF
+            | Subtype::AEF_CONTINUOUS
+            | Subtype::NTSCF
+            | Subtype::ESCF
+            | Subtype::EECF
+            | Subtype::AEF_DISCRETE => todo!("Alternative subtype {0} is not yet supported", common.subtype),
+        };
+
+        #[expect(unreachable_code)]
+        Ok(Self {
+            common,
+            alternative_data_payload,
+        })
     }
 }
 
 impl BitEncode for AvtpAlternativeHeader {
     type Error = io::Error;
 
-    fn encode<W: io::Write>(&self, _writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
-        todo!();
+    fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
+        assert_eq!(self.common.subtype.header_type(), HeaderType::Alternative);
+
+        self.common.encode(writer)?;
+        writer.write_bytes(&self.alternative_data_payload)?;
+
+        Ok(())
     }
 }
 
 impl BitDecode for AvtpAlternativeHeader {
     type Error = IOWrapError<UnknownSubtype>;
 
-    fn decode<R: io::Read>(_reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
-        todo!()
+    fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
+        // Bit aligned
+        let common = AvtpCommonHeader::decode(reader)?;
+        let decoded = Self::decode_after_common(common, reader)?;
+        Ok(decoded)
     }
 }
