@@ -1,3 +1,4 @@
+use pnet::datalink::NetworkInterface;
 use std::{
     fs::File,
     io::{self, BufRead, Write},
@@ -7,10 +8,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, info_span, trace, warn};
 
-use crate::{
-    net::interface::NetworkInterface,
-    ptp::state::{PtpSnapshot, SnapshotParseError},
-};
+use crate::ptp::state::{PtpSnapshot, SnapshotParseError};
 
 const SNAPSHOT_POLL_LOG_TARGET: &str = "rs_1722::ptp::snapshot_poll";
 const PTP4L_LOG_TARGET: &str = "rs_1722::ptp::ptp4l";
@@ -146,7 +144,7 @@ impl PtpInstance {
 
         info!(
             instance = name,
-            interface = %interface,
+            interface = interface.name,
             role = ?role,
             config_path = %config_path.display(),
             "created PTP instance"
@@ -204,7 +202,7 @@ impl PtpInstance {
     /// # Errors
     /// Returns an error if the `ptp4l` process cannot be spawned.
     pub fn start(&mut self) -> io::Result<()> {
-        let span = info_span!("start", role = ?self.role, interface = %self.interface);
+        let span = info_span!("start", role = ?self.role, interface = self.interface.name.as_str());
         let _enter = span.enter();
 
         if self.process.is_some() {
@@ -213,7 +211,7 @@ impl PtpInstance {
 
         let mut args = vec![
             "-i".to_string(),
-            self.interface.name().to_string(),
+            self.interface.name.clone(),
             "-H".to_string(),
             "-m".to_string(),
             "-2".to_string(),
@@ -364,7 +362,7 @@ impl PtpInstance {
     /// # Errors
     /// Returns an error if the process exists but cannot be terminated.
     pub fn stop(&mut self) -> io::Result<()> {
-        let span = info_span!("stop", role = ?self.role, interface = %self.interface);
+        let span = info_span!("stop", role = ?self.role, interface = self.interface.name.as_str());
         let _enter = span.enter();
 
         if let Some(mut child) = self.process.take() {
@@ -397,7 +395,7 @@ impl PtpInstance {
     /// - the process exits with a non-zero status
     /// - the output cannot be parsed into a valid snapshot
     pub fn snapshot(&mut self) -> Result<PtpSnapshot, PtpQueryError> {
-        let span = info_span!("snapshot", role = ?self.role, interface = %self.interface);
+        let span = info_span!("snapshot", role = ?self.role, interface = self.interface.name.as_str());
         let _enter = span.enter();
 
         self.ensure_process_running()?;
@@ -501,7 +499,7 @@ impl PtpInstance {
 
 impl Drop for PtpInstance {
     fn drop(&mut self) {
-        let span = info_span!("drop", role = ?self.role, interface = %self.interface);
+        let span = info_span!("drop", role = ?self.role, interface = self.interface.name.as_str());
         let _enter = span.enter();
 
         // Best effort cleanup, no panics

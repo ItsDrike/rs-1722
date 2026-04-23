@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rs_1722::net::interface::NetworkInterface;
+use pnet::datalink::{NetworkInterface, interfaces};
 use rs_1722::ptp::instance::{PtpInstance, PtpQueryError, PtpRole};
 use rs_1722::ptp::state::{PortState, PtpSnapshot};
 use tracing::{debug, error, info, info_span, warn};
@@ -96,7 +96,10 @@ fn main() {
 
 /// Returns a validated network interface or terminates the process.
 fn validated_interface(name: &str) -> NetworkInterface {
-    NetworkInterface::new(name.to_string()).unwrap_or_else(|| fatal(&format!("interface {name} does not exist")))
+    interfaces()
+        .into_iter()
+        .find(|interface| interface.name == name)
+        .unwrap_or_else(|| fatal(&format!("interface {name} does not exist")))
 }
 
 /// Installs a Ctrl+C handler and returns the shared shutdown flag.

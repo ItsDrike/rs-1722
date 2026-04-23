@@ -5,5 +5,4 @@
 
 pub mod avtp;
 pub mod io;
-pub mod net;
 pub mod ptp;
