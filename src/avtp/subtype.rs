@@ -4,7 +4,7 @@ use bitstream_io::{BigEndian, BitRead, BitWrite, BitWriter};
 use thiserror::Error;
 
 use crate::{
-    avtp::HeaderType,
+    avtp::headers::HeaderType,
     io::enc_dec::{BitDecode, BitEncode, IOWrapError},
 };
 

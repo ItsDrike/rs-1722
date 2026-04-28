@@ -4,29 +4,29 @@ use bitstream_io::{BigEndian, BitReader, BitWrite, BitWriter};
 
 use crate::{
     avtp::{
-        AvtpAlternativeHeader, AvtpCommonHeader, AvtpControlHeader, AvtpStreamHeader, HeaderType, IncompatibleSubtype,
-        Subtype, UnknownSubtype,
+        headers::{AlternativeHeader, CommonHeader, ControlHeader, HeaderType, StreamHeader},
+        subtype::{IncompatibleSubtype, Subtype, UnknownSubtype},
     },
     io::enc_dec::{BitDecode, BitEncode, IOWrapError},
 };
 
 #[derive(Debug, Clone)]
 pub enum Avtpdu {
-    Stream(AvtpStreamHeader),
-    Control(AvtpControlHeader),
-    Alternative(AvtpAlternativeHeader),
+    Stream(StreamHeader),
+    Control(ControlHeader),
+    Alternative(AlternativeHeader),
 }
 
 impl BitDecode for Avtpdu {
     type Error = IOWrapError<UnknownSubtype>;
 
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
-        let common = AvtpCommonHeader::decode(reader)?;
+        let common = CommonHeader::decode(reader)?;
 
         match common.subtype.header_type() {
-            HeaderType::Stream => Ok(Self::Stream(AvtpStreamHeader::decode_after_common(common, reader)?)),
-            HeaderType::Control => Ok(Self::Control(AvtpControlHeader::decode_after_common(common, reader)?)),
-            HeaderType::Alternative => Ok(Self::Alternative(AvtpAlternativeHeader::decode_after_common(
+            HeaderType::Stream => Ok(Self::Stream(StreamHeader::decode_after_common(common, reader)?)),
+            HeaderType::Control => Ok(Self::Control(ControlHeader::decode_after_common(common, reader)?)),
+            HeaderType::Alternative => Ok(Self::Alternative(AlternativeHeader::decode_after_common(
                 common, reader,
             )?)),
         }
@@ -58,9 +58,9 @@ impl Avtpdu {
 
     #[must_use]
     /// Obtain the common header shared by all AVTPDU header variants
-    pub const fn common_header(&self) -> &AvtpCommonHeader {
+    pub const fn common_header(&self) -> &CommonHeader {
         match self {
-            Self::Stream(h) => &h.common,
+            Self::Stream(h) => &h.generic.common,
             Self::Control(h) => &h.common,
             Self::Alternative(h) => &h.common,
         }
