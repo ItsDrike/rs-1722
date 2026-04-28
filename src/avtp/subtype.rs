@@ -1,6 +1,7 @@
 use std::io;
 
 use bitstream_io::{BigEndian, BitRead, BitWrite, BitWriter};
+use num_enum::TryFromPrimitive;
 use thiserror::Error;
 
 use crate::{
@@ -31,8 +32,9 @@ pub struct IncompatibleSubtype {
 }
 
 #[allow(non_camel_case_types)] // We want to stick to the spec names
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[num_enum(error_type(name = UnknownSubtype, constructor = UnknownSubtype))]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// AVTP subtype byte identifying the payload/control format.
 ///
 /// This value drives header interpretation (stream/control/alternative) and
@@ -170,43 +172,6 @@ impl Subtype {
 impl std::fmt::Display for Subtype {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?} (0x{:02X})", self, *self as u8)
-    }
-}
-
-impl TryFrom<u8> for Subtype {
-    type Error = UnknownSubtype;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        let subtype = match value {
-            0x00 => Self::IEC_61883_IIDC,
-            0x01 => Self::MMA_STREAM,
-            0x02 => Self::AAF,
-            0x03 => Self::CVF,
-            0x04 => Self::CRF,
-            0x05 => Self::TSCF,
-            0x06 => Self::SVF,
-            0x07 => Self::RVF,
-
-            0x6E => Self::AEF_CONTINUOUS,
-            0x6F => Self::VSF_STREAM,
-            0x7F => Self::EF_STREAM,
-
-            0x82 => Self::NTSCF,
-
-            0xEC => Self::ESCF,
-            0xED => Self::EECF,
-            0xEE => Self::AEF_DISCRETE,
-
-            0xFA => Self::ADP,
-            0xFB => Self::AECP,
-            0xFC => Self::ACMP,
-            0xFD => Self::MAAP,
-            0xFF => Self::EF_CONTROL,
-
-            _ => return Err(UnknownSubtype(value)),
-        };
-
-        Ok(subtype)
     }
 }
 
