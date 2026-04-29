@@ -3,6 +3,7 @@
 //
 
 mod avtpdu;
+pub mod formats;
 pub mod headers;
 mod stream_id;
 pub mod subtype;
