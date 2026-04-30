@@ -29,7 +29,7 @@ impl Ptp4lOutputStream {
     }
 }
 
-fn wrap_command_error(program: &str, error: io::Error) -> io::Error {
+fn wrap_command_error(program: &str, error: &io::Error) -> io::Error {
     let message = if error.kind() == io::ErrorKind::NotFound {
         format!("failed to execute `{program}`: command not found")
     } else {
@@ -238,7 +238,7 @@ impl PtpInstance {
                     "failed to spawn ptp4l process"
                 );
 
-                wrap_command_error("ptp4l", error)
+                wrap_command_error("ptp4l", &error)
             })?;
 
         let pid = child.id();
@@ -427,7 +427,7 @@ impl PtpInstance {
                 "failed to execute pmc"
             );
 
-            PtpQueryError::Io(wrap_command_error("pmc", error))
+            PtpQueryError::Io(wrap_command_error("pmc", &error))
         })?;
 
         if !output.status.success() {
