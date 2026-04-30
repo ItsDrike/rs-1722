@@ -76,9 +76,6 @@ pub struct GenericStreamData {
     ///
     /// Because the field is 32-bit, it wraps roughly every 4.29 seconds.
     pub avtp_timestamp: u32,
-
-    /// The length (in bytes) of the [`SpecificStreamData::stream_data_payload`] field.
-    pub stream_data_length: u16,
 }
 
 impl GenericStreamData {
@@ -139,9 +136,6 @@ pub struct SpecificStreamData {
     /// stream. Its structure, alignment, and semantics are fully defined by the
     /// selected [`crate::avtp::subtype::Subtype`] and any associated format
     /// specification.
-    ///
-    /// The number of bytes in this field must match the value of
-    /// [`GenericStreamData::stream_data_length`].
     pub stream_data_payload: Arc<[u8]>,
 }
 
@@ -203,7 +197,7 @@ impl StreamHeader {
         let stream_id = StreamID::decode(reader)?;
         let avtp_timestamp = reader.read_to()?;
         let format_specific_data_2 = reader.read_to()?;
-        let stream_data_length = reader.read_to()?;
+        let stream_data_length: u16 = reader.read_to()?;
         let format_specific_data_3 = reader.read_to()?;
         let stream_data_payload = read_arc(reader, usize::from(stream_data_length))?;
 
@@ -216,7 +210,6 @@ impl StreamHeader {
                 timestamp_uncertain,
                 stream_id,
                 avtp_timestamp,
-                stream_data_length,
             },
             specific: SpecificStreamData {
                 format_specific_data,
@@ -266,16 +259,15 @@ impl BitEncode for StreamHeader {
         self.generic.stream_id.encode(writer)?;
         writer.write_from(self.generic.avtp_timestamp)?;
         writer.write_from(self.specific.format_specific_data_2)?;
-        writer.write_from(self.generic.stream_data_length)?;
+
+        // TODO: Consider whether we should make this into an io error and keep the return type
+        // as-is, or wrap a custom error type here with this.
+        let stream_data_length = u16::try_from(self.specific.stream_data_payload.len())
+            .unwrap_or_else(|_| todo!("Error handling for stream_data_payload being too long is not yet implemented"));
+        writer.write_from(stream_data_length)?;
+
         writer.write_from(self.specific.format_specific_data_3)?;
 
-        // TODO: Consider if this debug assert should be a runtime error.
-        // This is hot path code though. Also, it would mean needing a custom
-        // err type for this.
-        debug_assert_eq!(
-            usize::from(self.generic.stream_data_length),
-            self.specific.stream_data_payload.len()
-        );
         writer.write_bytes(&self.specific.stream_data_payload)?;
 
         Ok(())
