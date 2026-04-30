@@ -363,7 +363,7 @@ pub mod pcm {
             writer.write::<4, _>(self.nominal_sample_rate as u8).unwrap();
             writer.write::<2, _>(0).unwrap(); // reserved
             writer.write::<10, _>(self.channels_per_frame.value()).unwrap();
-            writer.write::<8, _>(self.bit_depth).unwrap();
+            writer.write::<8, _>(self.bit_depth.get()).unwrap();
             debug_assert!(writer.byte_aligned());
 
             AafSpecificData {
