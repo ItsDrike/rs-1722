@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arbitrary_int::prelude::*;
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
-use getset::{CopyGetters, Getters};
+use getset::{CopyGetters, Getters, MutGetters};
 use num_enum::TryFromPrimitive;
 use thiserror::Error;
 
@@ -100,6 +100,11 @@ pub mod pcm {
         #[error("The size of the payload ({payload_size}) does not conform to the expected frame size {frame_size}")]
         /// The payload size does not align to a whole number of sample frames.
         PayloadSizeInvalid { payload_size: usize, frame_size: usize },
+
+        #[error("The size of the payload ({0}) overflows u16::MAX")]
+        /// The payload size can never overflow a u16, as the payload size is encoded with a u16
+        /// during transport.
+        PayloadTooLarge(usize),
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -287,13 +292,19 @@ pub mod pcm {
         ///
         /// # Errors
         ///
-        /// Returns [`InvalidPcmAaf::PayloadSizeInvalid`] if the payload length does
-        /// not align to a whole number of frames.
+        /// Returns:
+        /// - [`InvalidPcmAaf::PayloadSizeInvalid`] if the payload length does not align to a whole
+        ///   number of frames.
+        /// - [`InvalidPcmAaf::PayloadTooLarge`] if the payload length overflows `u16::MAX`.
         fn validate_payload_size(
             format: PcmFormat,
             payload_len: usize,
             channels_per_frame: u10,
         ) -> Result<(), InvalidPcmAaf> {
+            if payload_len > usize::from(u16::MAX) {
+                return Err(InvalidPcmAaf::PayloadTooLarge(payload_len));
+            }
+
             if let Some(word_size_bits) = format.word_size() {
                 debug_assert_eq!(word_size_bits % 8, 0);
                 let word_size_bytes = usize::from(word_size_bits / 8);
@@ -644,18 +655,33 @@ impl Aaf {
     /// Internal helper to ensure the given stream data are valid
     /// for an AAF format's expectations.
     fn validate_stream_data(stream_data: &GenericStreamData) -> Result<(), InvalidAaf> {
-        if stream_data.common.subtype != Subtype::AAF {
-            return Err(InvalidAaf::InvalidSubtype(stream_data.common.subtype));
+        if stream_data.common().subtype != Subtype::AAF {
+            return Err(InvalidAaf::InvalidSubtype(stream_data.common().subtype));
         }
 
         if !stream_data.stream_id_valid() {
             return Err(InvalidAaf::StreamIdInvalid);
         }
 
-        if stream_data.common.version.value() != 0 {
-            return Err(InvalidAaf::UnsupportedVersion(stream_data.common.version));
+        if stream_data.common().version.value() != 0 {
+            return Err(InvalidAaf::UnsupportedVersion(stream_data.common().version));
         }
 
+        Ok(())
+    }
+
+    /// Update the [`Self::stream_data`] value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidAaf`] if:
+    ///
+    /// - the subtype is not AAF
+    /// - the stream ID is not marked as valid
+    /// - the AVTP version is not supported
+    pub fn set_stream_data(&mut self, stream_data: GenericStreamData) -> Result<(), InvalidAaf> {
+        Self::validate_stream_data(&stream_data)?;
+        self.stream_data = stream_data;
         Ok(())
     }
 }
@@ -674,19 +700,20 @@ impl TryFrom<StreamHeader> for Aaf {
         // When writing, the spec expects these to be zero, when receiving, they
         // can safely be dropped (even if non-zero).
 
-        let [format, f1, f2, f3] = stream_header.specific.format_specific_data_2;
+        let [format, f1, f2, f3] = stream_header.specific.format_specific_data_2();
         let aaf_format_specific_data_1 = [f1, f2, f3];
 
         // The unwraps here are safe, as all of these read operations are using a static buffer
         // which cannot produce an IO error here.
-        let mut reader = BitReader::endian(&stream_header.specific.format_specific_data_3[..], BigEndian);
+        let format_specific_data_3 = &stream_header.specific.format_specific_data_3()[..];
+        let mut reader = BitReader::endian(format_specific_data_3, BigEndian);
         let asfd = unsafe { u3::new_unchecked(reader.read::<3, u8>().unwrap()) };
         let sparse_timestamp = reader.read::<1, bool>().unwrap();
         let event_flags = unsafe { u4::new_unchecked(reader.read::<4, u8>().unwrap()) };
         let aaf_format_specific_data_2 = reader.read::<8, u8>().unwrap();
         debug_assert!(reader.byte_aligned());
 
-        let aaf_format_specific_payload = stream_header.specific.stream_data_payload;
+        let aaf_format_specific_payload = stream_header.specific.stream_data_payload();
 
         let format = AafFormat::try_from(format).map_err(|e| InvalidAaf::FormatReserved(e.number))?;
 
@@ -723,20 +750,25 @@ impl From<Aaf> for StreamHeader {
             .write::<8, _>(generic_fmt_data.aaf_format_specific_data_2)
             .unwrap();
 
+        // The individual variants must ensure that their invariants do not allow the payload length
+        // to overflow u16::MAX.
+        let specific = SpecificStreamData::new_unchecked(
+            u2::new(0),
+            u7::new(0),
+            [
+                generic_fmt_data.format as u8,
+                generic_fmt_data.aaf_format_specific_data_1[0],
+                generic_fmt_data.aaf_format_specific_data_1[1],
+                generic_fmt_data.aaf_format_specific_data_1[2],
+            ],
+            buffer,
+            generic_fmt_data.aaf_format_specific_payload,
+        )
+        .expect("Payload length overflows u16::MAX");
+
         Self {
             generic: val.stream_data,
-            specific: SpecificStreamData {
-                format_specific_data: u2::new(0),
-                format_specific_data_1: u7::new(0),
-                format_specific_data_2: [
-                    generic_fmt_data.format as u8,
-                    generic_fmt_data.aaf_format_specific_data_1[0],
-                    generic_fmt_data.aaf_format_specific_data_1[1],
-                    generic_fmt_data.aaf_format_specific_data_1[2],
-                ],
-                format_specific_data_3: buffer,
-                stream_data_payload: generic_fmt_data.aaf_format_specific_payload,
-            },
+            specific,
         }
     }
 }

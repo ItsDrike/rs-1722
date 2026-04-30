@@ -2,6 +2,8 @@ use std::{io, sync::Arc};
 
 use arbitrary_int::prelude::*;
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
+use getset::{CloneGetters, CopyGetters, Getters, MutGetters, Setters};
+use thiserror::Error;
 
 use crate::{
     avtp::{
@@ -15,7 +17,15 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
+pub enum StreamDataError {
+    #[error("The payload size can be at most u16::MAX, found: {0}")]
+    /// Due to transport limitations, which encode the payload size in a [`u16`], the payload must
+    /// not be larger than `u16::MAX`.
+    PayloadTooLarge(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Getters, Setters, CopyGetters)]
 /// Transport-level metadata shared by all AVTP stream-oriented packets.
 ///
 /// This structure contains fields that are interpreted uniformly across all
@@ -29,7 +39,8 @@ pub struct GenericStreamData {
     /// The preceding common header. See [`CommonHeader`].
     ///
     /// [`CommonHeader::header_specific_bit`] maps to [`Self::stream_id_valid`].
-    pub common: CommonHeader, // 12 bits
+    #[getset(get = "pub", get_mut = "pub", set = "pub")]
+    common: CommonHeader, // 12 bits
 
     /// Media-clock restart indicator (`mr`).
     ///
@@ -39,20 +50,23 @@ pub struct GenericStreamData {
     ///
     /// A practical receiver strategy is to treat a toggle as a resync hint and
     /// re-lock timing as quickly as possible.
-    pub media_clock_restart: bool,
+    #[getset(get_copy = "pub", set = "pub")]
+    media_clock_restart: bool,
 
     /// Timestamp validity flag (`tv`) for [`Self::avtp_timestamp`].
     ///
     /// When `false`, receivers should treat [`Self::avtp_timestamp`] as undefined
     /// and avoid scheduling playback from it.
-    pub avtp_timestamp_valid: bool,
+    #[getset(get_copy = "pub", set = "pub")]
+    avtp_timestamp_valid: bool,
 
     /// Per-stream packet sequence counter.
     ///
     /// Talkers increment this byte on each outgoing AVTPDU, wrapping from
     /// `0xFF` to `0x00`. Receivers can use gaps to detect packet loss and
     /// must tolerate arbitrary starting values when joining mid-stream.
-    pub sequence_num: u8,
+    #[getset(get_copy = "pub", set = "pub")]
+    sequence_num: u8,
 
     /// Timestamp-uncertain flag (`tu`).
     ///
@@ -60,10 +74,12 @@ pub struct GenericStreamData {
     /// temporarily unreliable (for example after a clock-step event). Receivers
     /// can use this signal to hold or smooth timeline recovery until timing
     /// stabilizes again.
-    pub timestamp_uncertain: bool,
+    #[getset(get_copy = "pub", set = "pub")]
+    timestamp_uncertain: bool,
 
     /// Stable 64-bit identifier of the source stream.
-    pub stream_id: StreamID, // 8 bytes
+    #[getset(get_copy = "pub", set = "pub")]
+    stream_id: StreamID, // 8 bytes
 
     /// Presentation timestamp in nanoseconds on a wrapping 32-bit timeline.
     ///
@@ -75,7 +91,8 @@ pub struct GenericStreamData {
     /// ```
     ///
     /// Because the field is 32-bit, it wraps roughly every 4.29 seconds.
-    pub avtp_timestamp: u32,
+    #[getset(get_copy = "pub", set = "pub")]
+    avtp_timestamp: u32,
 }
 
 impl GenericStreamData {
@@ -87,9 +104,44 @@ impl GenericStreamData {
     pub const fn stream_id_valid(&self) -> bool {
         self.common.header_specific_bit
     }
+
+    /// Set the `sv` bit (stream ID valid).
+    ///
+    /// Stream-header based formats generally require a valid [`Self::stream_id`],
+    /// so this is usually `true`.
+    pub const fn set_stream_id_valid(&mut self, val: bool) {
+        self.common.header_specific_bit = val;
+    }
+
+    #[must_use]
+    /// Construct any arbitrary generic stream data.
+    ///
+    /// This function allows construction of [`GenericStreamData`] without validating any
+    /// format-specific invariants, as this type on its own is not format-aware. However, it is
+    /// important to note that the specific formats may rely on certain invariants on these fields
+    /// which this constructor does NOT check for.
+    pub const fn new_unchecked(
+        common: CommonHeader,
+        media_clock_restart: bool,
+        avtp_timestamp_valid: bool,
+        sequence_num: u8,
+        timestamp_uncertain: bool,
+        stream_id: StreamID,
+        avtp_timestamp: u32,
+    ) -> Self {
+        Self {
+            common,
+            media_clock_restart,
+            avtp_timestamp_valid,
+            sequence_num,
+            timestamp_uncertain,
+            stream_id,
+            avtp_timestamp,
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Getters, MutGetters, CopyGetters, CloneGetters, Setters)]
 /// Subtype-defined fields and payload for AVTP stream-oriented packets.
 ///
 /// This structure contains all fields whose meaning depends on the selected
@@ -105,7 +157,8 @@ pub struct SpecificStreamData {
     /// [`crate::avtp::subtype::Subtype`] and may encode small control flags or
     /// mode indicators required by the selected stream format. Their meaning is
     /// not defined at the AVTP transport layer.
-    pub format_specific_data: u2,
+    #[getset(get_copy = "pub", set = "pub")]
+    format_specific_data: u2,
 
     /// Additional subtype-defined extension bits.
     ///
@@ -113,7 +166,8 @@ pub struct SpecificStreamData {
     /// by the selected [`crate::avtp::subtype::Subtype`]. They are commonly
     /// used to extend control flags or encode compact format-specific
     /// parameters.
-    pub format_specific_data_1: u7,
+    #[getset(get_copy = "pub", set = "pub")]
+    format_specific_data_1: u7,
 
     /// Additional subtype-defined extension bytes.
     ///
@@ -121,14 +175,16 @@ pub struct SpecificStreamData {
     /// or packed fields required to interpret [`Self::stream_data_payload`].
     /// The exact layout is defined by the selected
     /// [`crate::avtp::subtype::Subtype`].
-    pub format_specific_data_2: [u8; 4],
+    #[getset(get_copy = "pub", get_mut = "pub", set = "pub")]
+    format_specific_data_2: [u8; 4],
 
     /// Additional subtype-defined extension bytes.
     ///
     /// These bytes often contain bit-packed fields extending the information
     /// provided in [`Self::format_specific_data_2`]. Interpretation is entirely
     /// subtype-specific.
-    pub format_specific_data_3: [u8; 2],
+    #[getset(get_copy = "pub", get_mut = "pub", set = "pub")]
+    format_specific_data_3: [u8; 2],
 
     /// Format payload bytes.
     ///
@@ -136,7 +192,55 @@ pub struct SpecificStreamData {
     /// stream. Its structure, alignment, and semantics are fully defined by the
     /// selected [`crate::avtp::subtype::Subtype`] and any associated format
     /// specification.
-    pub stream_data_payload: Arc<[u8]>,
+    #[getset(get_clone = "pub")]
+    stream_data_payload: Arc<[u8]>,
+}
+
+impl SpecificStreamData {
+    /// Construct any arbitrary specific stream data.
+    ///
+    /// This function allows construction of [`SpecificStreamData`] without validating any
+    /// format-specific invariants, as this type on its own is not format-aware. However, it is
+    /// important to note that the specific formats may rely on certain invariants on these fields
+    /// which this constructor does NOT check for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamDataError`] if the payload size overflows [`u16`]
+    pub fn new_unchecked(
+        format_specific_data: u2,
+        format_specific_data_1: u7,
+        format_specific_data_2: [u8; 4],
+        format_specific_data_3: [u8; 2],
+        stream_data_payload: Arc<[u8]>,
+    ) -> Result<Self, StreamDataError> {
+        if stream_data_payload.len() > usize::from(u16::MAX) {
+            return Err(StreamDataError::PayloadTooLarge(stream_data_payload.len()));
+        }
+
+        Ok(Self {
+            format_specific_data,
+            format_specific_data_1,
+            format_specific_data_2,
+            format_specific_data_3,
+            stream_data_payload,
+        })
+    }
+
+    /// Set the [`Self::stream_data_payload`] to a new value
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamDataError`] if the payload size overflows [`u16`]
+    pub fn set_stream_data_payload(&mut self, stream_data_payload: Arc<[u8]>) -> Result<(), StreamDataError> {
+        if stream_data_payload.len() > usize::from(u16::MAX) {
+            return Err(StreamDataError::PayloadTooLarge(stream_data_payload.len()));
+        }
+
+        self.stream_data_payload = stream_data_payload;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +327,7 @@ impl StreamHeader {
 }
 
 impl BitEncode for StreamHeader {
-    type Error = io::Error;
+    type Error = IOWrapError<StreamDataError>;
 
     /// Encode the Stream Header info.
     ///
@@ -260,10 +364,9 @@ impl BitEncode for StreamHeader {
         writer.write_from(self.generic.avtp_timestamp)?;
         writer.write_from(self.specific.format_specific_data_2)?;
 
-        // TODO: Consider whether we should make this into an io error and keep the return type
-        // as-is, or wrap a custom error type here with this.
-        let stream_data_length = u16::try_from(self.specific.stream_data_payload.len())
-            .unwrap_or_else(|_| todo!("Error handling for stream_data_payload being too long is not yet implemented"));
+        let stream_data_len = self.specific.stream_data_payload.len();
+        let stream_data_length = u16::try_from(stream_data_len)
+            .map_err(|_| IOWrapError::Specific(StreamDataError::PayloadTooLarge(stream_data_len)))?;
         writer.write_from(stream_data_length)?;
 
         writer.write_from(self.specific.format_specific_data_3)?;

@@ -1,14 +1,38 @@
 use std::io;
 
 use bitstream_io::{BigEndian, BitReader, BitWrite, BitWriter};
+use thiserror::Error;
 
 use crate::{
     avtp::{
-        headers::{AlternativeHeader, CommonHeader, ControlHeader, HeaderType, StreamHeader},
+        headers::{AlternativeHeader, CommonHeader, ControlHeader, HeaderType, StreamDataError, StreamHeader},
         subtype::{IncompatibleSubtype, Subtype, UnknownSubtype},
     },
     io::enc_dec::{BitDecode, BitEncode, IOWrapError},
 };
+
+#[derive(Debug, Error)]
+pub enum AvtpduError {
+    #[error(transparent)]
+    UnknownSubtype(#[from] UnknownSubtype),
+
+    #[error(transparent)]
+    IncompatibleSubtype(#[from] IncompatibleSubtype),
+
+    #[error(transparent)]
+    StreamHeaderError(#[from] StreamDataError),
+}
+
+impl From<IOWrapError<UnknownSubtype>> for IOWrapError<AvtpduError> {
+    fn from(err: IOWrapError<UnknownSubtype>) -> Self {
+        err.map_specific(AvtpduError::UnknownSubtype)
+    }
+}
+impl From<IOWrapError<StreamDataError>> for IOWrapError<AvtpduError> {
+    fn from(err: IOWrapError<StreamDataError>) -> Self {
+        err.map_specific(AvtpduError::StreamHeaderError)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Avtpdu {
@@ -18,7 +42,7 @@ pub enum Avtpdu {
 }
 
 impl BitDecode for Avtpdu {
-    type Error = IOWrapError<UnknownSubtype>;
+    type Error = IOWrapError<AvtpduError>;
 
     fn decode<R: io::Read>(reader: &mut BitReader<R, BigEndian>) -> Result<Self, Self::Error> {
         let common = CommonHeader::decode(reader)?;
@@ -34,13 +58,13 @@ impl BitDecode for Avtpdu {
 }
 
 impl BitEncode for Avtpdu {
-    type Error = io::Error;
+    type Error = IOWrapError<AvtpduError>;
 
     fn encode<W: io::Write>(&self, writer: &mut BitWriter<W, BigEndian>) -> Result<(), Self::Error> {
         match self {
-            Self::Stream(h) => h.encode(writer),
-            Self::Control(h) => h.encode(writer),
-            Self::Alternative(h) => h.encode(writer),
+            Self::Stream(h) => Ok(h.encode(writer)?),
+            Self::Control(h) => Ok(h.encode(writer)?),
+            Self::Alternative(h) => Ok(h.encode(writer)?),
         }
     }
 }
@@ -58,9 +82,9 @@ impl Avtpdu {
 
     #[must_use]
     /// Obtain the common header shared by all AVTPDU header variants
-    pub const fn common_header(&self) -> &CommonHeader {
+    pub fn common_header(&self) -> &CommonHeader {
         match self {
-            Self::Stream(h) => &h.generic.common,
+            Self::Stream(h) => h.generic.common(),
             Self::Control(h) => &h.common,
             Self::Alternative(h) => &h.common,
         }
@@ -68,7 +92,7 @@ impl Avtpdu {
 
     #[must_use]
     /// Obtain the subtype from the common header shared by all AVTPDU header variants
-    pub const fn subtype(&self) -> Subtype {
+    pub fn subtype(&self) -> Subtype {
         self.common_header().subtype
     }
 
@@ -109,9 +133,9 @@ impl Avtpdu {
     ///
     /// If the passed writer is a simple buffer, and the caller made sure the internal state is
     /// consistent with the expected invariants, this can be considered as infallible.
-    pub fn write<W: io::Write>(&self, writer: &mut W) -> Result<(), IOWrapError<IncompatibleSubtype>> {
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> Result<(), IOWrapError<AvtpduError>> {
         if let Err(exc) = self.validate_subtype() {
-            return Err(IOWrapError::Specific(exc));
+            return Err(IOWrapError::Specific(AvtpduError::from(exc)));
         }
 
         let mut writer = BitWriter::endian(writer, BigEndian);
@@ -133,7 +157,7 @@ impl Avtpdu {
     ///   reading the data using the provided reader.
     /// - Additionally, [`IOWrapError::Specific`] err variant is returned if the packet data were in
     ///   an internally inconsistent state, which couldn't be parsed.
-    pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, IOWrapError<UnknownSubtype>> {
+    pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, IOWrapError<AvtpduError>> {
         let mut reader = BitReader::endian(reader, BigEndian);
         Self::decode(&mut reader)
     }
