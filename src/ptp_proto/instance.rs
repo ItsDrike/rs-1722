@@ -107,7 +107,7 @@ pub enum PtpRole {
 /// # Lifecycle
 ///
 /// - [`start`](Self::start) spawns the `ptp4l` process
-/// - [`get_status`](Self::get_status) queries synchronization state
+/// - [`snapshot`](Self::snapshot) queries synchronization state
 /// - [`stop`](Self::stop) terminates the process
 ///
 /// Resources are automatically cleaned up when the instance is dropped.

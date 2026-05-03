@@ -432,7 +432,7 @@ pub mod pcm {
         /// This provides read-only access to the underlying audio data without
         /// cloning the internal buffer.
         ///
-        /// For shared ownership of the payload, use [`Self::payload`] instead.
+        /// For shared ownership of the payload, use `payload()` instead.
         #[must_use]
         pub fn payload_slice(&self) -> &[u8] {
             &self.payload

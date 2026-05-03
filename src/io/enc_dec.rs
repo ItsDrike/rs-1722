@@ -47,7 +47,7 @@ pub(crate) trait BitEncode {
 
 /// A helper error type that combines I/O errors with type-specific decoding errors.
 ///
-/// This is useful for [`BitDecode`] implementations where both:
+/// This is useful for `BitDecode` implementations where both:
 /// - low-level I/O failures (e.g., read errors), and
 /// - higher-level parsing or validation errors
 ///   need to be represented.

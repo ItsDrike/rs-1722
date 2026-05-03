@@ -17,7 +17,7 @@ use crate::{
 /// It is designed to be very flexible and allow representing essentially any custom structures by
 /// containing a dynamic payload, which are just prefixed by the common header.
 pub struct AlternativeHeader {
-    /// The preceding common header. See [`AvtpCommonHeader`].
+    /// The preceding common header. See [`CommonHeader`].
     ///
     /// `common.header_specific_bit` meaning differs depending on the format that
     /// use the alternative header.
@@ -31,14 +31,14 @@ pub struct AlternativeHeader {
 
 impl AlternativeHeader {
     /// Decode the Alternative Header info from a reader that had already decoded the
-    /// [`AvtpCommonHeader`] header.
+    /// [`CommonHeader`] header.
     ///
     /// This is useful because the common header is generally read first, as it contains data based
     /// on which the type of header is decided.
     ///
     /// # Preconditions
     ///
-    /// - The provided reader must be positioned immediately after decoding an [`AvtpCommonHeader`].
+    /// - The provided reader must be positioned immediately after decoding a [`CommonHeader`].
     ///   When decoding begins from a byte-aligned input, this places the reader at a 4-bit offset.
     /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Alternative`]
     ///   subtype.

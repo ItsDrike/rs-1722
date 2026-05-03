@@ -18,7 +18,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Header used by AVTP control-oriented packets.
 pub struct ControlHeader {
-    /// The preceding common header. See [`AvtpCommonHeader`].
+    /// The preceding common header. See [`CommonHeader`].
     ///
     /// `common.header_specific_bit` maps to `sv` (stream ID valid). See
     /// [`Self::stream_id_valid`].
@@ -26,7 +26,7 @@ pub struct ControlHeader {
 
     /// Control-format extension bits.
     ///
-    /// Meaning depends on [`AvtpCommonHeader::subtype`].
+    /// Meaning depends on [`CommonHeader::subtype`].
     pub format_specific_data: u9,
 
     /// Size of [`Self::control_data_payload`] in bytes.
@@ -52,14 +52,14 @@ impl ControlHeader {
     }
 
     /// Decode the Control Header info from a reader that had already decoded the
-    /// [`AvtpCommonHeader`] header.
+    /// [`CommonHeader`] header.
     ///
     /// This is useful because the common header is generally read first, as it contains data based
     /// on which the type of header is decided.
     ///
     /// # Preconditions
     ///
-    /// - The provided reader must be positioned immediately after decoding an [`AvtpCommonHeader`].
+    /// - The provided reader must be positioned immediately after decoding a [`CommonHeader`].
     ///   When decoding begins from a byte-aligned input, this places the reader at a 4-bit offset.
     /// - The [common header subtype][`Subtype::header_type`] must be a [`HeaderType::Control`]
     ///   subtype.

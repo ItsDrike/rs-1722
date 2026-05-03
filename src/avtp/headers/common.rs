@@ -22,7 +22,8 @@ pub struct CommonHeader {
     /// A single flag whose meaning depends on the selected header family.
     ///
     /// For stream and control headers this bit is exposed as `sv` via
-    /// [`StreamHeader::stream_id_valid`] and [`ControlHeader::stream_id_valid`].
+    /// [`crate::avtp::headers::GenericStreamData::stream_id_valid`] and
+    /// [`crate::avtp::headers::ControlHeader::stream_id_valid`].
     pub header_specific_bit: bool, // 1 bit
 
     /// Protocol version bits for this header layout.
