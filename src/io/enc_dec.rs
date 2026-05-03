@@ -75,6 +75,7 @@ impl<E> IOWrapError<E> {
     /// # Example
     /// ```rust
     /// use std::io;
+    /// use rs_1722::io::enc_dec::IOWrapError;
     ///
     /// #[derive(Debug, thiserror::Error)]
     /// #[error("parse error")]

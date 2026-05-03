@@ -5,4 +5,5 @@
 
 pub mod avtp;
 pub mod io;
-pub mod ptp;
+pub mod ptp_phc;
+pub mod ptp_proto;

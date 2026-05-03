@@ -538,6 +538,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arbitrary-int",
+ "bitflags",
  "bitstream-io",
  "clap",
  "ctrlc",

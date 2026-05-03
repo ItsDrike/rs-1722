@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, info_span, trace, warn};
 
-use crate::ptp::state::{PtpSnapshot, SnapshotParseError};
+use crate::ptp_proto::state::{PtpSnapshot, SnapshotParseError};
 
 const SNAPSHOT_POLL_LOG_TARGET: &str = "rs_1722::ptp::snapshot_poll";
 const PTP4L_LOG_TARGET: &str = "rs_1722::ptp::ptp4l";

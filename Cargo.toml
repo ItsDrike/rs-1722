@@ -12,6 +12,7 @@ license = "LGPL-3.0-only"
 [dependencies]
 anyhow = "1.0.102"
 arbitrary-int = "2.1.1"
+bitflags = "2.11.1"
 bitstream-io = "4.10.0"
 clap = { version = "4.6.1", features = ["derive"] }
 ctrlc = "3.5.2"

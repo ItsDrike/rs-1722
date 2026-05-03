@@ -9,8 +9,8 @@ use std::{
 };
 
 use pnet::datalink::{NetworkInterface, interfaces};
-use rs_1722::ptp::instance::{PtpInstance, PtpQueryError, PtpRole};
-use rs_1722::ptp::state::{PortState, PtpSnapshot};
+use rs_1722::ptp_proto::instance::{PtpInstance, PtpQueryError, PtpRole};
+use rs_1722::ptp_proto::state::{PortState, PtpSnapshot};
 use tracing::{debug, error, info, info_span, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
