@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arbitrary_int::prelude::*;
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
-use getset::{CopyGetters, Getters, MutGetters};
+use getset::{CopyGetters, Getters};
 use num_enum::TryFromPrimitive;
 use thiserror::Error;
 
