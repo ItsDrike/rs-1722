@@ -1,9 +1,8 @@
-use crate::ptp_phc::{
-    abi::{PtpPinDesc, PtpPinFunction},
-    error::{Error, Result},
-};
+use crate::ptp_phc::abi::{PtpPinDesc, PtpPinFunction};
 
 /// PTP pin functions exposed by the Linux PTP subsystem.
+///
+/// These values describe how a programmable PHC pin is currently routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinFunction {
     /// No function assigned.
@@ -18,18 +17,21 @@ pub enum PinFunction {
     /// Physical synchronization pin.
     PhysicalSync,
 
-    /// Unknown function number assigned
+    /// Unknown function number assigned by the driver.
+    ///
+    /// This can be observed when reading a pin configuration from hardware that
+    /// exposes a kernel value not currently modeled by this crate.
     Unknown(u32),
 }
 
 impl PinFunction {
-    pub(crate) const fn to_abi(self) -> Result<PtpPinFunction> {
+    pub(crate) const fn to_abi(self) -> PtpPinFunction {
         match self {
-            Self::None => Ok(PtpPinFunction::PTP_PF_NONE),
-            Self::ExternalTimestamp => Ok(PtpPinFunction::PTP_PF_EXTTS),
-            Self::PeriodicOutput => Ok(PtpPinFunction::PTP_PF_PEROUT),
-            Self::PhysicalSync => Ok(PtpPinFunction::PTP_PF_PHYSYNC),
-            Self::Unknown(raw) => Err(Error::UnsupportedPinFunction(raw)),
+            Self::None => PtpPinFunction::PTP_PF_NONE,
+            Self::ExternalTimestamp => PtpPinFunction::PTP_PF_EXTTS,
+            Self::PeriodicOutput => PtpPinFunction::PTP_PF_PEROUT,
+            Self::PhysicalSync => PtpPinFunction::PTP_PF_PHYSYNC,
+            Self::Unknown(raw) => PtpPinFunction(raw),
         }
     }
 
@@ -39,37 +41,40 @@ impl PinFunction {
             PtpPinFunction::PTP_PF_EXTTS => Self::ExternalTimestamp,
             PtpPinFunction::PTP_PF_PEROUT => Self::PeriodicOutput,
             PtpPinFunction::PTP_PF_PHYSYNC => Self::PhysicalSync,
+            PtpPinFunction(other) => Self::Unknown(other),
         }
     }
 }
 
+/// Description of one programmable PHC pin.
+///
+/// A pin maps one physical hardware pin to one PTP-related hardware function,
+/// optionally selecting which channel of that function is routed there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
+    /// Human-readable pin name reported by the kernel or driver.
     pub name: String,
+
+    /// Physical pin index on the PHC.
     pub index: u32,
+
+    /// Function currently assigned to the pin.
     pub function: PinFunction,
+
+    /// Channel number used by the assigned function.
+    ///
+    /// For example, when [`Self::function`] is [`PinFunction::PeriodicOutput`],
+    /// this selects which periodic-output channel drives the pin.
     pub channel: u32,
 }
 
 impl Pin {
     pub(crate) fn from_desc(desc: PtpPinDesc) -> Self {
         Self {
-            name: pin_name(&desc),
+            name: desc.pin_name(),
             index: desc.index,
             function: PinFunction::from_abi(desc.func),
             channel: desc.chan,
         }
     }
-}
-
-fn pin_name(desc: &PtpPinDesc) -> String {
-    let bytes: Vec<u8> = desc
-        .name
-        .iter()
-        .copied()
-        .take_while(|byte| *byte != 0)
-        .map(|byte| u8::from_ne_bytes(byte.to_ne_bytes()))
-        .collect();
-
-    String::from_utf8_lossy(&bytes).into_owned()
 }

@@ -8,28 +8,49 @@ use std::{
 };
 
 use crate::ptp_phc::{
-    Edge,
+    Edge, ExternalTimestampFlags,
     abi::{
-        PtpClockCaps, PtpClockTime, PtpExttsEvent, PtpExttsFlags, PtpExttsRequest, PtpPeroutFlags,
-        PtpPeroutRequest, PtpPinDesc, ptp_clock_getcaps_ioctl, ptp_extts_request_ioctl,
-        ptp_extts_request2_ioctl, ptp_perout_request_ioctl, ptp_perout_request2_ioctl, ptp_pin_getfunc_ioctl,
-        ptp_pin_setfunc_ioctl,
+        PtpClockCaps, PtpClockTime, PtpExttsEvent, PtpExttsFlags, PtpExttsRequest, PtpPeroutFlags, PtpPeroutRequest,
+        PtpPinDesc, ptp_clock_getcaps_ioctl, ptp_extts_request_ioctl, ptp_extts_request2_ioctl,
+        ptp_perout_request_ioctl, ptp_perout_request2_ioctl, ptp_pin_getfunc_ioctl, ptp_pin_setfunc_ioctl,
     },
     error::{Error, Result},
     pin::{Pin, PinFunction},
-    time::{PtpTime, Timestamp},
+    time::PtpTime,
 };
 
+/// High-level capabilities reported by one PTP hardware clock.
+///
+/// This is the public, ergonomic view of the kernel's PHC capability block.
+/// The values describe which optional operations are supported by the device
+/// and how many channels or pins are available for each operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
+    /// Maximum frequency adjustment supported by the PHC, in parts per billion.
     pub max_adjustment_ppb: i32,
+
+    /// Number of programmable alarm channels supported by the device.
     pub programmable_alarms: i32,
+
+    /// Number of external timestamp capture channels available.
     pub external_timestamp_channels: i32,
+
+    /// Number of periodic-output channels available.
     pub periodic_output_channels: i32,
+
+    /// Whether the device supports the generic PPS enable operation.
     pub pulse_per_second: bool,
+
+    /// Number of programmable physical pins exposed by the PHC.
     pub programmable_pins: i32,
+
+    /// Whether precise PHC/system cross timestamping is supported.
     pub cross_timestamping: bool,
+
+    /// Whether the PHC supports phase adjustment operations.
     pub adjust_phase: bool,
+
+    /// Maximum supported phase adjustment, in nanoseconds.
     pub max_phase_adjustment_ns: i32,
 }
 
@@ -49,13 +70,31 @@ impl From<PtpClockCaps> for Capabilities {
     }
 }
 
+/// One externally captured timestamp event read from a PHC device.
+///
+/// Events of this type are produced by [`PtpClock::read_external_timestamp_event`]
+/// after a channel has been enabled with
+/// [`PtpClock::enable_external_timestamping`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalTimestampEvent {
-    pub timestamp: Timestamp,
+    /// PHC timestamp captured for the external input event.
+    pub timestamp: PtpTime,
+
+    /// External timestamp channel that produced this event.
     pub channel: u32,
-    pub flags: u32,
+
+    /// Kernel event flags associated with the captured edge.
+    ///
+    /// These indicate properties reported by the Linux PTP ABI for the event,
+    /// such as whether the event record is valid.
+    pub flags: ExternalTimestampFlags,
 }
 
+/// Handle to one Linux PTP hardware clock device.
+///
+/// A `PtpClock` owns an open `/dev/ptpX` file descriptor and provides methods
+/// for issuing the relevant PTP ioctls and reading external timestamp events.
+#[derive(Debug)]
 pub struct PtpClock {
     device: File,
     path: PathBuf,
@@ -66,6 +105,11 @@ impl PtpClock {
     ///
     /// # Errors
     /// Returns an error if the device path cannot be opened for reading and writing.
+    ///
+    /// # Note
+    /// This does NOT check whether the given file path points to a valid PTP device.
+    /// If this is not the case, errors will occur later on, when communication with
+    /// this device is actually attempted.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -81,6 +125,7 @@ impl PtpClock {
         Ok(Self { device, path })
     }
 
+    /// Returns the filesystem path of the opened PHC device.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -117,12 +162,11 @@ impl PtpClock {
     /// Routes a PTP function to a programmable pin.
     ///
     /// # Errors
-    /// Returns an error if the pin function cannot be represented in the kernel ABI or if the
-    /// underlying set-function ioctl fails.
+    /// Returns an error if the underlying set-function ioctl fails.
     pub fn set_pin_function(&self, index: u32, function: PinFunction, channel: u32) -> Result<()> {
         let desc = PtpPinDesc {
             index,
-            func: function.to_abi()?,
+            func: function.to_abi(),
             chan: channel,
             ..PtpPinDesc::default()
         };
@@ -140,10 +184,13 @@ impl PtpClock {
     /// Reads the current time from the PTP hardware clock.
     ///
     /// # Errors
-    /// Returns an error if `clock_gettime` fails or the returned nanoseconds do not fit in `u32`.
+    /// Returns an error if `clock_gettime` fails.
     pub fn time(&self) -> Result<PtpTime> {
         let ts = self.clock_gettime()?;
-        PtpTime::from_timespec(ts)
+
+        // SAFETY: `clock_gettime` returns a normalized `timespec` with
+        // `tv_nsec` in the range `0..1_000_000_000` on success.
+        Ok(unsafe { PtpTime::from_normalized_timespec(ts) })
     }
 
     /// Enables periodic output on a PTP periodic-output channel.
@@ -164,6 +211,10 @@ impl PtpClock {
             request.flags = PtpPeroutFlags::PHASE;
         } else {
             let now = self.clock_gettime()?;
+
+            // Match the kernel's `testptp` default: start on a whole-second
+            // boundary with about 1-2 seconds of slack so the absolute start
+            // time is safely in the future by the time the ioctl is handled.
             request.start_or_phase = PtpClockTime {
                 sec: now.tv_sec + 2,
                 nsec: 0,
@@ -194,6 +245,10 @@ impl PtpClock {
             request.flags = PtpPeroutFlags::PHASE;
         } else {
             let now = self.clock_gettime()?;
+
+            // Match the kernel's `testptp` default: start on a whole-second
+            // boundary with about 1-2 seconds of slack so the absolute start
+            // time is safely in the future by the time the ioctl is handled.
             request.start_or_phase = PtpClockTime {
                 sec: now.tv_sec + 2,
                 nsec: 0,
@@ -258,12 +313,8 @@ impl PtpClock {
     pub fn read_external_timestamp_event(&mut self) -> Result<ExternalTimestampEvent> {
         let mut event = PtpExttsEvent::default();
 
-        let event_bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                (&raw mut event).cast::<u8>(),
-                mem::size_of::<PtpExttsEvent>(),
-            )
-        };
+        let event_bytes =
+            unsafe { std::slice::from_raw_parts_mut((&raw mut event).cast::<u8>(), mem::size_of::<PtpExttsEvent>()) };
 
         self.device
             .read_exact(event_bytes)
@@ -272,7 +323,7 @@ impl PtpClock {
         Ok(ExternalTimestampEvent {
             timestamp: PtpTime::from_abi(event.t),
             channel: event.index,
-            flags: event.flags.bits(),
+            flags: event.flags,
         })
     }
 

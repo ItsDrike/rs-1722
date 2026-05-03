@@ -1,5 +1,6 @@
-//! This file contains the matching definitions of the PTP structures and ioctl interactions exposed
-//! by the Linux kernel. For the exact reference, see: `<linux/ptp_clock.h>`. You can find this in:
+//! This file contains the matching definitions of the PTP structures and ioctl
+//! interactions exposed by the Linux kernel. For the exact reference, see:
+//! `<linux/ptp_clock.h>`. You can find this in:
 //! <https://github.com/torvalds/linux/blob/master/include/uapi/linux/ptp_clock.h>
 
 use nix::{ioctl_read, ioctl_readwrite, ioctl_write_ptr};
@@ -212,8 +213,8 @@ bitflags::bitflags! {
 
         /// Periodic output flag: interpret the first time field as a phase.
         ///
-        /// Not all drivers support this. The Intel I210 through `igb` often supports plain periodic output,
-        /// but may reject newer optional flags.
+        /// Not all drivers support this. The Intel I210 through `igb` often supports
+        /// plain periodic output, but may reject newer optional flags.
         const PHASE = 1 << 2;
     }
 }
@@ -224,12 +225,13 @@ bitflags::bitflags! {
 pub struct PtpPeroutRequest {
     /// Absolute start time or phase offset.
     ///
-    /// If [`PtpPeroutFlags::PHASE`] is not set in [`Self::flags`], this field is interpreted as the
-    /// absolute PHC time at which the periodic output should start.
+    /// If [`PtpPeroutFlags::PHASE`] is not set in [`Self::flags`], this field is
+    /// interpreted as the absolute PHC time at which the periodic output should start.
     ///
-    /// If [`PtpPeroutFlags::DUTY_CYCLE`] is set in [`Self::flags`], this field is interpreted as a
-    /// phase offset within the period. In that mode, the output starts as soon as possible at an
-    /// implementation-chosen integer multiple of [`Self::period`] plus this offset.
+    /// If [`PtpPeroutFlags::DUTY_CYCLE`] is set in [`Self::flags`], this field is
+    /// interpreted as a phase offset within the period. In that mode, the output starts
+    /// as soon as possible at an implementation-chosen integer multiple of
+    /// [`Self::period`] plus this offset.
     pub start_or_phase: PtpClockTime,
 
     /// Desired periodic-output period.
@@ -239,8 +241,8 @@ pub struct PtpPeroutRequest {
 
     /// Periodic-output channel to configure.
     ///
-    /// This corresponds to the channel selected by [`PtpPinDesc::chan`] when a pin is assigned
-    /// [`PtpPinFunction::PTP_PF_PEROUT`].
+    /// This corresponds to the channel selected by [`PtpPinDesc::chan`] when a pin is
+    /// assigned [`PtpPinFunction::PTP_PF_PEROUT`].
     pub index: u32,
 
     /// Periodic-output request flags.
@@ -248,48 +250,53 @@ pub struct PtpPeroutRequest {
 
     /// Signal on-time or reserved storage.
     ///
-    /// If [`PTP_PEROUT_DUTY_CYCLE`] is set in [`Self::flags`], this field is interpreted as the
-    /// signal's on-time and must be smaller than [`Self::period`].
+    /// If [`PTP_PEROUT_DUTY_CYCLE`] is set in [`Self::flags`], this field is interpreted
+    /// as the signal's on-time and must be smaller than [`Self::period`].
     ///
     /// If [`PTP_PEROUT_DUTY_CYCLE`] is not set, this field is reserved and should be zero.
     pub on_or_rsv: PtpClockTime,
 }
 
-/// Kernel ABI type matching `enum ptp_pin_function`.
+/// Kernel ABI type matching the raw `func` field in `struct ptp_pin_desc`.
 ///
-/// This enum describes which PTP clock function is routed to a programmable hardware pin.
+/// In the Linux UAPI, `ptp_pin_desc.func` is an `unsigned int`, with the
+/// common known values described by `enum ptp_pin_function`. This wrapper keeps
+/// the exact ABI layout while still giving that field a dedicated Rust type and
+/// naming the standard values as implemented constants.
 ///
-/// It is used with [`PtpPinDesc`] and the [`ptp_pin_getfunc_ioctl`] / [`ptp_pin_setfunc_ioctl`]
-/// ioctls.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, Default)]
-#[expect(non_camel_case_types)] // Keep Linux UAPI names verbatim.
-pub enum PtpPinFunction {
+/// Unknown raw values are preserved as-is, which keeps the ABI forward
+/// compatible with drivers or kernels that expose values not modeled here yet.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PtpPinFunction(pub u32);
+
+impl PtpPinFunction {
     /// No PTP function is assigned to the pin.
     ///
     /// The pin is not routed to an external timestamp input, periodic output,
     /// or other PTP-specific hardware function.
-    #[default]
-    PTP_PF_NONE = 0,
+    pub const PTP_PF_NONE: Self = Self(0);
 
     /// External timestamp input.
     ///
     /// The pin is used as an input. Edges on the pin can be timestamped by the
     /// PHC and reported through [`ptp_extts_request_ioctl`].
-    PTP_PF_EXTTS = 1,
+    pub const PTP_PF_EXTTS: Self = Self(1);
 
     /// Periodic output.
     ///
-    /// The pin is used as an output driven by the PHC. This is used for hardware-generated periodic
-    /// signals configured through [`PtpPeroutRequest`], such as a 1 Hz or 1 kHz output.
-    PTP_PF_PEROUT = 2,
+    /// The pin is used as an output driven by the PHC. This is used for
+    /// hardware-generated periodic signals configured through
+    /// [`PtpPeroutRequest`], such as a 1 Hz or 1 kHz output.
+    pub const PTP_PF_PEROUT: Self = Self(2);
 
     /// Physical synchronization pin.
     ///
-    /// Device-specific synchronization function. Unlike [`Self::PTP_PF_EXTTS`] and
-    /// [`Self::PTP_PF_PEROUT`], this does not correspond to the generic external timestamp or
-    /// periodic-output APIs, and support depends on the specific PHC driver and hardware.
-    PTP_PF_PHYSYNC = 3,
+    /// Device-specific synchronization function. Unlike
+    /// [`Self::PTP_PF_EXTTS`] and [`Self::PTP_PF_PEROUT`], this does not
+    /// correspond to the generic external timestamp or periodic-output APIs,
+    /// and support depends on the specific PHC driver and hardware.
+    pub const PTP_PF_PHYSYNC: Self = Self(3);
 }
 
 /// Kernel ABI type matching `struct ptp_pin_desc`.
@@ -334,7 +341,7 @@ pub struct PtpPinDesc {
     /// This selects the kind of hardware time I/O block routed to the pin, such
     /// as external timestamp capture or periodic output generation.
     ///
-    /// See [`PtpPinFunction`] for the supported function values.
+    /// See [`PtpPinFunction`] for the standard known values.
     pub func: PtpPinFunction,
 
     /// Channel instance used by [`Self::func`].
@@ -355,10 +362,25 @@ impl Default for PtpPinDesc {
         Self {
             name: [0; 64],
             index: 0,
-            func: PtpPinFunction::default(),
+            func: PtpPinFunction::PTP_PF_NONE,
             chan: 0,
             rsv: [0; 5],
         }
+    }
+}
+
+impl PtpPinDesc {
+    /// Convert the C string in the name field into a proper Rust String.
+    pub fn pin_name(&self) -> String {
+        let bytes: Vec<u8> = self
+            .name
+            .iter()
+            .copied()
+            .take_while(|byte| *byte != 0)
+            .map(|byte| u8::from_ne_bytes(byte.to_ne_bytes()))
+            .collect();
+
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
