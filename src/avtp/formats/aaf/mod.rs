@@ -5,4 +5,4 @@ pub mod stream;
 
 pub use common::{Aaf, AafFormat, AafFormatSpecificError, AafVariant, InvalidAaf};
 pub use pcm::{AafPcm, PcmFormat, SampleRate};
-pub use stream::{AafPcmListener, AafPcmTalker, ReceivedPcm, StreamFilter};
+pub use stream::{AafPcmListener, AafPcmTalker, ReceivedPcm};

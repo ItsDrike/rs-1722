@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arbitrary_int::prelude::*;
-use pnet::util::MacAddr;
 use thiserror::Error;
 
 use crate::avtp::{
     headers::{CommonHeader, GenericStreamData},
+    stream::{StreamFilter, StreamListener, StreamTalker},
     subtype::Subtype,
     Avtpdu, StreamID,
 };
@@ -25,30 +25,6 @@ pub enum AafStreamError {
 
     #[error(transparent)]
     InvalidAaf(#[from] InvalidAaf),
-}
-
-/// Specifies which streams to accept when listening to AVTP packets.
-#[derive(Debug, Clone, Copy)]
-pub enum StreamFilter {
-    /// Accept packets from any stream.
-    Any,
-
-    /// Accept packets only from a specific MAC address, regardless of stream UID.
-    MacOnly(MacAddr),
-
-    /// Accept packets only from an exact stream ID (MAC + UID combination).
-    Exact(StreamID),
-}
-
-impl StreamFilter {
-    /// Returns `true` if the given stream ID matches this filter.
-    fn matches(&self, stream_id: StreamID) -> bool {
-        match self {
-            Self::Any => true,
-            Self::MacOnly(mac) => stream_id.mac_address == *mac,
-            Self::Exact(id) => stream_id == *id,
-        }
-    }
 }
 
 /// Received PCM audio frame from an AVTP stream.
@@ -218,7 +194,7 @@ impl AafPcmListener {
     ///
     /// Ignores the stream UID (`unique_id`) field.
     #[must_use]
-    pub const fn new_with_mac_filter(mac: MacAddr) -> Self {
+    pub const fn new_with_mac_filter(mac: pnet::util::MacAddr) -> Self {
         Self {
             filter: StreamFilter::MacOnly(mac),
             expected_seq: None,
@@ -279,5 +255,22 @@ impl AafPcmListener {
             bit_depth: aaf_pcm.bit_depth(),
             packets_lost,
         }))
+    }
+}
+
+impl StreamTalker for AafPcmTalker {
+    type Error = AafStreamError;
+
+    fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, Self::Error> {
+        Self::build_packet(self, payload)
+    }
+}
+
+impl StreamListener for AafPcmListener {
+    type Output = ReceivedPcm;
+    type Error = AafStreamError;
+
+    fn process(&mut self, pdu: &Avtpdu) -> Result<Option<Self::Output>, Self::Error> {
+        Self::process(self, pdu)
     }
 }
