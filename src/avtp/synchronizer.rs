@@ -1,3 +1,4 @@
+#![expect(dead_code)]
 use std::time::{Duration, Instant};
 
 use crate::ptp_phc::{PtpClock, PtpTime};
@@ -57,7 +58,7 @@ pub enum ClockError {
 ///   would introduce audible discontinuities in audio playback.
 /// - **Strict monotonicity**: Required by AVTP spec; each timestamp must be strictly
 ///   greater than the previous, which this clock enforces even across clock corrections.
-pub struct PllClock<'a> {
+pub struct PtpSynchronizedClock<'a> {
     clock: &'a PtpClock,
 
     /// Initial PTP time (reference point for elapsed calculations)
@@ -89,7 +90,7 @@ pub struct PllClock<'a> {
     resync_interval: Duration,
 }
 
-impl<'a> PllClock<'a> {
+impl<'a> PtpSynchronizedClock<'a> {
     /// Creates a new PLL clock synchronized to the given PTP clock.
     ///
     /// Uses a default resync interval of 100ms, which provides good balance between
