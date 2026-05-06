@@ -38,10 +38,6 @@ pub enum Error {
     #[error("failed to read external timestamp event")]
     ReadExternalTimestamp(#[source] io::Error),
 
-    /// A negative timestamp value was supplied where the kernel ABI requires a non-negative one.
-    #[error("timestamp value must be non-negative")]
-    NegativeTimestamp,
-
     /// A `Duration` did not fit into the Linux PTP timestamp representation.
     #[error("duration is too large for PTP clock time")]
     DurationTooLarge,

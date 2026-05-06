@@ -200,14 +200,16 @@ impl PtpClock {
     /// current clock time cannot be read for an absolute start time, or if the periodic-output
     /// ioctl fails.
     pub fn enable_periodic_output(&self, channel: u32, period: Duration, phase: Option<Duration>) -> Result<()> {
+        let period = PtpTime::try_from(period)?;
+
         let mut request = PtpPeroutRequest {
-            period: PtpTime::duration_to_abi(period)?,
+            period: period.into_abi(),
             index: channel,
             ..PtpPeroutRequest::default()
         };
 
         if let Some(phase) = phase {
-            request.start_or_phase = PtpTime::duration_to_abi(phase)?;
+            request.start_or_phase = PtpTime::try_from(phase)?.into_abi();
             request.flags = PtpPeroutFlags::PHASE;
         } else {
             let now = self.clock_gettime()?;
@@ -232,16 +234,16 @@ impl PtpClock {
     /// ABI, if the current clock time cannot be read for an absolute start time, or if the
     /// periodic-output ioctl fails.
     pub fn enable_periodic_output_ns(&self, channel: u32, period_ns: i64, phase_ns: Option<i64>) -> Result<()> {
-        let period = PtpTime::from_ns(period_ns)?;
+        let period = PtpTime::from_ns(period_ns);
 
         let mut request = PtpPeroutRequest {
-            period,
+            period: period.into_abi(),
             index: channel,
             ..PtpPeroutRequest::default()
         };
 
         if let Some(phase_ns) = phase_ns {
-            request.start_or_phase = PtpTime::from_ns(phase_ns)?;
+            request.start_or_phase = PtpTime::from_ns(phase_ns).into_abi();
             request.flags = PtpPeroutFlags::PHASE;
         } else {
             let now = self.clock_gettime()?;

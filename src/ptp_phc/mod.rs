@@ -45,7 +45,7 @@ pub use crate::ptp_phc::{
     clock::{Capabilities, ExternalTimestampEvent, PtpClock},
     error::{Error, Result},
     pin::{Pin, PinFunction},
-    time::{Nanoseconds, PtpTime},
+    time::PtpTime,
 };
 
 /// External timestamp edge selection.
