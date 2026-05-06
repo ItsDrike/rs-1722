@@ -69,7 +69,7 @@ impl From<crate::ptp_phc::PtpTime> for AvtpTimestamp {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let total_nanos = (ptp_time.seconds as u64)
             .wrapping_mul(1_000_000_000)
-            .wrapping_add(u64::from(ptp_time.nanoseconds)) as u32;
+            .wrapping_add(u64::from(ptp_time.nanoseconds.get())) as u32;
         Self(total_nanos)
     }
 }
