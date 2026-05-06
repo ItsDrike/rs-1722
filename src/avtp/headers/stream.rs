@@ -10,6 +10,7 @@ use crate::{
         headers::{CommonHeader, HeaderType},
         stream_id::StreamID,
         subtype::UnknownSubtype,
+        timestamp::AvtpTimestamp,
     },
     io::{
         enc_dec::{BitDecode, BitEncode, IOWrapError},
@@ -84,15 +85,9 @@ pub struct GenericStreamData {
     /// Presentation timestamp in nanoseconds on a wrapping 32-bit timeline.
     ///
     /// This value is meaningful only when [`Self::avtp_timestamp_valid`] is
-    /// `true`. It is derived from absolute gPTP time as:
-    ///
-    /// ```text
-    /// (gptp_seconds * 1_000_000_000 + gptp_nanoseconds) mod 2^32
-    /// ```
-    ///
-    /// Because the field is 32-bit, it wraps roughly every 4.29 seconds.
+    /// `true`. It is derived from absolute gPTP time using [`AvtpTimestamp`].
     #[getset(get_copy = "pub", set = "pub")]
-    avtp_timestamp: u32,
+    avtp_timestamp: AvtpTimestamp,
 }
 
 impl GenericStreamData {
@@ -127,7 +122,7 @@ impl GenericStreamData {
         sequence_num: u8,
         timestamp_uncertain: bool,
         stream_id: StreamID,
-        avtp_timestamp: u32,
+        avtp_timestamp: AvtpTimestamp,
     ) -> Self {
         Self {
             common,
@@ -299,7 +294,8 @@ impl StreamHeader {
         debug_assert!(reader.byte_aligned());
 
         let stream_id = StreamID::decode(reader)?;
-        let avtp_timestamp = reader.read_to()?;
+        let avtp_timestamp: u32 = reader.read_to()?;
+        let avtp_timestamp = AvtpTimestamp::from(avtp_timestamp);
         let format_specific_data_2 = reader.read_to()?;
         let stream_data_length: u16 = reader.read_to()?;
         let format_specific_data_3 = reader.read_to()?;
@@ -361,7 +357,7 @@ impl BitEncode for StreamHeader {
         debug_assert!(writer.byte_aligned());
 
         self.generic.stream_id.encode(writer)?;
-        writer.write_from(self.generic.avtp_timestamp)?;
+        writer.write_from(self.generic.avtp_timestamp.as_u32())?;
         writer.write_from(self.specific.format_specific_data_2)?;
 
         let stream_data_len = self.specific.stream_data_payload.len();

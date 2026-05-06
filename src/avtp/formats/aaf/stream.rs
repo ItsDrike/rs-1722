@@ -9,7 +9,7 @@ use crate::avtp::{
     headers::{CommonHeader, GenericStreamData},
     stream::{StreamFilter, StreamListener, StreamTalker},
     subtype::Subtype,
-    Avtpdu, StreamID,
+    AvtpTimestamp, Avtpdu, StreamID,
 };
 
 use super::{AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate, Aaf};
@@ -116,9 +116,7 @@ impl AafPcmTalker {
     /// Returns [`AafStreamError`] if the packet construction fails.
     pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafStreamError> {
         // Compute the AVTP timestamp from the elapsed time since stream start
-        // The timestamp is naturally wrapped to 32 bits per the AVTP spec
-        #[allow(clippy::cast_possible_truncation)]
-        let avtp_timestamp = self.start_time.elapsed().as_nanos() as u32;
+        let avtp_timestamp = AvtpTimestamp::from(self.start_time.elapsed());
 
         // Create the PCM variant
         let pcm = AafPcm::new(
