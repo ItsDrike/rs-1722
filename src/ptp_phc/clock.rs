@@ -548,11 +548,6 @@ impl PtpClock {
             })),
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "Warning: PTP device {} not found, falling back to system time (CLOCK_REALTIME)",
-                        path.display()
-                    );
-                    eprintln!("         This fallback mode is for testing/development only and should not be used in production");
                     Ok(Self::SystemTime(PtpClockSystemTime))
                 } else {
                     Err(Error::OpenDevice {
