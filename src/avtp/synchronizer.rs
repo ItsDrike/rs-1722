@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::ptp_phc::{PtpClock, PtpTime};
+use crate::ptp_phc::{PtpTime, PtpTimeSource};
 
 /// Error type for clock operations.
 #[derive(Debug, thiserror::Error)]
@@ -57,8 +57,8 @@ pub enum ClockError {
 ///   would introduce audible discontinuities in audio playback.
 /// - **Strict monotonicity**: Required by AVTP spec; each timestamp must be strictly
 ///   greater than the previous, which this clock enforces even across clock corrections.
-pub struct PtpSynchronizedClock {
-    clock: PtpClock,
+pub struct PtpSynchronizedClock<T: PtpTimeSource> {
+    clock: T,
 
     /// Initial PTP time (reference point for elapsed calculations)
     initial_ptp_time: PtpTime,
@@ -89,7 +89,7 @@ pub struct PtpSynchronizedClock {
     resync_interval: Duration,
 }
 
-impl PtpSynchronizedClock {
+impl<T: PtpTimeSource> PtpSynchronizedClock<T> {
     /// Creates a new PLL clock synchronized to the given PTP clock.
     ///
     /// Takes ownership of the clock device.
@@ -99,7 +99,7 @@ impl PtpSynchronizedClock {
     /// # Errors
     ///
     /// Returns an error if the initial PTP clock read fails.
-    pub fn new(clock: PtpClock) -> Result<Self, ClockError> {
+    pub fn new(clock: T) -> Result<Self, ClockError> {
         Self::with_resync_interval(clock, Duration::from_millis(100))
     }
 
@@ -119,7 +119,7 @@ impl PtpSynchronizedClock {
     /// # Errors
     ///
     /// Returns an error if the initial PTP clock read fails.
-    pub fn with_resync_interval(clock: PtpClock, resync_interval: Duration) -> Result<Self, ClockError> {
+    pub fn with_resync_interval(clock: T, resync_interval: Duration) -> Result<Self, ClockError> {
         let initial_ptp_time = clock.time()?;
         let now = Instant::now();
         Ok(Self {
@@ -183,6 +183,37 @@ impl PtpSynchronizedClock {
     pub fn elapsed_no_resync(&mut self) -> Result<Duration, ClockError> {
         let now = Instant::now();
         self.compute_elapsed(now)
+    }
+
+    /// Returns the synchronized absolute PTP time (initial + elapsed).
+    ///
+    /// This combines the initial PTP baseline with the monotonically-increasing elapsed time
+    /// to produce an absolute gPTP timestamp that is:
+    /// - **Monotonically increasing**: Each call returns a strictly greater value than the previous
+    /// - **Synchronized to PTP**: Frequency-adjusted via the PLL to track actual PTP time
+    /// - **Suitable for AVTP**: Can be directly converted to AVTP presentation timestamps
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if elapsed computation fails or overflows.
+    pub fn ptp_time(&mut self) -> Result<PtpTime, ClockError> {
+        let elapsed = self.elapsed()?;
+
+        // Convert elapsed Duration (u128 nanoseconds) to i128 for PTP time
+        //
+        // Duration stores u64 seconds + at most 10^9 - 1 ns, so the Duration::MAX.as_nanos()
+        // is u64::MAX * 10^9 + (10^9 - 1). Which is below i128::MAX (fits in 94 bits), so
+        // this cast is always safe.
+        #[allow(clippy::cast_possible_wrap)]
+        let elapsed_ns = elapsed.as_nanos() as i128;
+
+        let absolute_ns = self
+            .initial_ptp_time
+            .as_nanos()
+            .checked_add(elapsed_ns)
+            .ok_or(ClockError::DurationOverflow)?;
+
+        PtpTime::from_ns_i128(absolute_ns).ok_or(ClockError::DurationOverflow)
     }
 
     /// Internal: Computes elapsed time using the most recent PTP measurement.

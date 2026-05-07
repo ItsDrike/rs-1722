@@ -19,6 +19,18 @@ use crate::ptp_phc::{
     time::PtpTime,
 };
 
+/// Shared interface for any source of PTP time.
+///
+/// This trait is implemented by all PTP clock types (`PtpClockHardware`, `PtpClockSystemTime`, `PtpClock`)
+/// and enables generic code to work with any clock source.
+pub trait PtpTimeSource {
+    /// Reads the current time from the PTP clock.
+    ///
+    /// # Errors
+    /// Returns an error if the time reading fails.
+    fn time(&self) -> Result<PtpTime>;
+}
+
 /// High-level capabilities reported by one PTP hardware clock.
 ///
 /// This is the public, ergonomic view of the kernel's PHC capability block.
@@ -72,9 +84,9 @@ impl From<PtpClockCaps> for Capabilities {
 
 /// One externally captured timestamp event read from a PHC device.
 ///
-/// Events of this type are produced by [`PtpClock::read_external_timestamp_event`]
+/// Events of this type are produced by [`PtpClockHardware::read_external_timestamp_event`]
 /// after a channel has been enabled with
-/// [`PtpClock::enable_external_timestamping`].
+/// [`PtpClockHardware::enable_external_timestamping`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalTimestampEvent {
     /// PHC timestamp captured for the external input event.
@@ -90,21 +102,27 @@ pub struct ExternalTimestampEvent {
     pub flags: ExternalTimestampFlags,
 }
 
-/// Handle to one Linux PTP hardware clock device.
+/// Handle to one Linux PTP hardware clock device with full feature support.
 ///
-/// A `PtpClock` owns an open `/dev/ptpX` file descriptor and provides methods
-/// for issuing the relevant PTP ioctls and reading external timestamp events.
+/// A `PtpClockHardware` provides access to all hardware PTP operations:
+/// - Reading time from the clock
+/// - Querying capabilities and pins
+/// - Configuring pins and periodic output
+/// - Capturing external timestamps
+///
+/// To support systems without PTP hardware, use [`PtpClock::open_with_system_time_fallback`]
+/// for runtime flexibility, or use [`PtpClockSystemTime`] for explicit system-time-only operation.
 #[derive(Debug)]
-pub struct PtpClock {
+pub struct PtpClockHardware {
     device: File,
     path: PathBuf,
 }
 
-impl PtpClock {
+impl PtpClockHardware {
     /// Opens a PTP hardware clock device.
     ///
     /// # Errors
-    /// Returns an error if the device path cannot be opened for reading and writing.
+    /// Returns an error if the device file cannot be opened (does not exist, permission denied, etc.)
     ///
     /// # Note
     /// This does NOT check whether the given file path points to a valid PTP device.
@@ -172,25 +190,13 @@ impl PtpClock {
         };
 
         unsafe {
-            ptp_pin_setfunc_ioctl(self.fd(), &raw const desc).map_err(|source| Error::Ioctl {
+            ptp_pin_setfunc_ioctl(self.hardware_fd(), &raw const desc).map_err(|source| Error::Ioctl {
                 operation: "PTP_PIN_SETFUNC",
                 source,
             })?;
         }
 
         Ok(())
-    }
-
-    /// Reads the current time from the PTP hardware clock.
-    ///
-    /// # Errors
-    /// Returns an error if `clock_gettime` fails.
-    pub fn time(&self) -> Result<PtpTime> {
-        let ts = self.clock_gettime()?;
-
-        // SAFETY: `clock_gettime` returns a normalized `timespec` with
-        // `tv_nsec` in the range `0..1_000_000_000` on success.
-        Ok(unsafe { PtpTime::from_normalized_timespec(ts) })
     }
 
     /// Enables periodic output on a PTP periodic-output channel.
@@ -318,9 +324,7 @@ impl PtpClock {
         let event_bytes =
             unsafe { std::slice::from_raw_parts_mut((&raw mut event).cast::<u8>(), mem::size_of::<PtpExttsEvent>()) };
 
-        self.device
-            .read_exact(event_bytes)
-            .map_err(Error::ReadExternalTimestamp)?;
+        self.device.read_exact(event_bytes).map_err(Error::ReadExternalTimestamp)?;
 
         Ok(ExternalTimestampEvent {
             timestamp: PtpTime::from_abi(event.t),
@@ -329,11 +333,15 @@ impl PtpClock {
         })
     }
 
+    fn hardware_fd(&self) -> RawFd {
+        self.device.as_raw_fd()
+    }
+
     fn raw_capabilities(&self) -> Result<PtpClockCaps> {
         let mut caps = PtpClockCaps::default();
 
         unsafe {
-            ptp_clock_getcaps_ioctl(self.fd(), &raw mut caps).map_err(|source| Error::Ioctl {
+            ptp_clock_getcaps_ioctl(self.hardware_fd(), &raw mut caps).map_err(|source| Error::Ioctl {
                 operation: "PTP_CLOCK_GETCAPS",
                 source,
             })?;
@@ -349,7 +357,7 @@ impl PtpClock {
         };
 
         unsafe {
-            ptp_pin_getfunc_ioctl(self.fd(), &raw mut desc).map_err(|source| Error::Ioctl {
+            ptp_pin_getfunc_ioctl(self.hardware_fd(), &raw mut desc).map_err(|source| Error::Ioctl {
                 operation: "PTP_PIN_GETFUNC",
                 source,
             })?;
@@ -359,14 +367,14 @@ impl PtpClock {
     }
 
     fn perout_request(&self, request: &PtpPeroutRequest) -> Result<()> {
-        let new_result = unsafe { ptp_perout_request2_ioctl(self.fd(), request) };
+        let new_result = unsafe { ptp_perout_request2_ioctl(self.hardware_fd(), request) };
 
         if new_result.is_ok() {
             return Ok(());
         }
 
         unsafe {
-            ptp_perout_request_ioctl(self.fd(), request).map_err(|source| Error::Ioctl {
+            ptp_perout_request_ioctl(self.hardware_fd(), request).map_err(|source| Error::Ioctl {
                 operation: "PTP_PEROUT_REQUEST",
                 source,
             })?;
@@ -376,14 +384,14 @@ impl PtpClock {
     }
 
     fn extts_request(&self, request: &PtpExttsRequest) -> Result<()> {
-        let new_result = unsafe { ptp_extts_request2_ioctl(self.fd(), request) };
+        let new_result = unsafe { ptp_extts_request2_ioctl(self.hardware_fd(), request) };
 
         if new_result.is_ok() {
             return Ok(());
         }
 
         unsafe {
-            ptp_extts_request_ioctl(self.fd(), request).map_err(|source| Error::Ioctl {
+            ptp_extts_request_ioctl(self.hardware_fd(), request).map_err(|source| Error::Ioctl {
                 operation: "PTP_EXTTS_REQUEST",
                 source,
             })?;
@@ -393,9 +401,9 @@ impl PtpClock {
     }
 
     fn clock_gettime(&self) -> Result<nix::libc::timespec> {
-        let clock_id = clock_id_from_fd(self.fd());
-        let mut ts = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let clock_id = clock_id_from_fd(self.hardware_fd());
 
+        let mut ts = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
         let ret = unsafe { nix::libc::clock_gettime(clock_id, &raw mut ts) };
 
         if ret < 0 {
@@ -404,9 +412,177 @@ impl PtpClock {
 
         Ok(ts)
     }
+}
 
-    fn fd(&self) -> RawFd {
-        self.device.as_raw_fd()
+impl PtpTimeSource for PtpClockHardware {
+    fn time(&self) -> Result<PtpTime> {
+        let ts = self.clock_gettime()?;
+
+        // SAFETY: `clock_gettime` returns a normalized `timespec` with
+        // `tv_nsec` in the range `0..1_000_000_000` on success.
+        Ok(unsafe { PtpTime::from_normalized_timespec(ts) })
+    }
+}
+
+/// System time fallback using `CLOCK_REALTIME`.
+///
+/// **Warning**: For testing and development only. Timestamps are not synchronized with PTP hardware
+/// and may drift. Never use in production without actual hardware PTP.
+///
+/// This type is useful for running PTP-dependent code on systems without hardware PTP devices,
+/// but should never be relied upon for production synchronization.
+///
+/// Create with [`PtpClockSystemTime::new`].
+#[derive(Debug, Clone, Copy)]
+pub struct PtpClockSystemTime;
+
+impl PtpClockSystemTime {
+    /// Creates a new system-time clock.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for PtpClockSystemTime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PtpTimeSource for PtpClockSystemTime {
+    fn time(&self) -> Result<PtpTime> {
+        let mut ts = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_REALTIME, &raw mut ts) };
+
+        if ret < 0 {
+            return Err(Error::ClockGettime(std::io::Error::last_os_error()));
+        }
+
+        // SAFETY: `clock_gettime` returns a normalized `timespec` with
+        // `tv_nsec` in the range `0..1_000_000_000` on success.
+        Ok(unsafe { PtpTime::from_normalized_timespec(ts) })
+    }
+}
+
+/// Runtime-flexible PTP clock that can be either hardware or system-time based.
+///
+/// A `PtpClock` provides access to time reading from either:
+/// - **Hardware variant**: An open `/dev/ptpX` file descriptor with full PTP hardware support
+/// - **System time variant**: `CLOCK_REALTIME` via syscall (testing only)
+///
+/// For code that statically knows it needs hardware operations (pins, external timestamps, etc.),
+/// use [`PtpClockHardware`] directly to get compile-time guarantees that the operations exist.
+///
+/// For code that needs runtime flexibility (e.g., binaries with `--system-time-fallback`),
+/// use `PtpClock` and implement time access through the [`PtpTimeSource`] trait.
+///
+/// # Creating a `PtpClock`
+///
+/// ```no_run
+/// use rs_1722::ptp_phc::{PtpClock, PtpTimeSource};
+///
+/// # fn main() -> rs_1722::ptp_phc::Result<()> {
+/// // Hardware-only (strict)
+/// let clock = PtpClock::open("/dev/ptp0")?;
+/// println!("Current time: {}", clock.time()?);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// use rs_1722::ptp_phc::{PtpClock, PtpTimeSource};
+///
+/// # fn main() -> rs_1722::ptp_phc::Result<()> {
+/// // With system-time fallback
+/// let clock = PtpClock::open_with_system_time_fallback("/dev/ptp0")?;
+/// println!("Current time: {}", clock.time()?);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub enum PtpClock {
+    /// Hardware PTP device with full feature support.
+    Hardware(PtpClockHardware),
+
+    /// System time fallback (testing/development only).
+    SystemTime(PtpClockSystemTime),
+}
+
+impl PtpClock {
+    /// Opens a PTP hardware clock device in strict mode.
+    ///
+    /// This method requires the device to exist and be accessible. If you need to support
+    /// systems without PTP hardware, use [`Self::open_with_system_time_fallback`] instead.
+    ///
+    /// # Errors
+    /// Returns an error if the device file cannot be opened (does not exist, permission denied, etc.)
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        PtpClockHardware::open(path).map(Self::Hardware)
+    }
+
+    /// Opens a PTP hardware clock device with system time fallback.
+    ///
+    /// **Warning**: This mode is intended for **testing and development only**. Use it only when:
+    /// - You cannot access hardware PTP devices
+    /// - You are running automated tests or development builds
+    /// - You understand that timestamps will not be synchronized with real PTP hardware
+    ///
+    /// If the device exists, it will be used (hardware mode). If the device does not exist,
+    /// this method falls back to `CLOCK_REALTIME` (system time) and logs a warning.
+    ///
+    /// In fallback mode:
+    /// - `time()` will work normally
+    /// - Timestamps may drift relative to real PTP synchronization
+    ///
+    /// # Errors
+    /// Returns an error if the device cannot be opened for any reason other than "not found",
+    /// or if system time is unavailable (extremely rare).
+    pub fn open_with_system_time_fallback(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+
+        match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(device) => Ok(Self::Hardware(PtpClockHardware {
+                device,
+                path,
+            })),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "Warning: PTP device {} not found, falling back to system time (CLOCK_REALTIME)",
+                        path.display()
+                    );
+                    eprintln!("         This fallback mode is for testing/development only and should not be used in production");
+                    Ok(Self::SystemTime(PtpClockSystemTime))
+                } else {
+                    Err(Error::OpenDevice {
+                        path,
+                        source: e,
+                    })
+                }
+            }
+        }
+    }
+}
+
+impl PtpTimeSource for PtpClock {
+    fn time(&self) -> Result<PtpTime> {
+        match self {
+            Self::Hardware(hw) => hw.time(),
+            Self::SystemTime(st) => st.time(),
+        }
+    }
+}
+
+impl From<PtpClockHardware> for PtpClock {
+    fn from(hw: PtpClockHardware) -> Self {
+        Self::Hardware(hw)
+    }
+}
+
+impl From<PtpClockSystemTime> for PtpClock {
+    fn from(st: PtpClockSystemTime) -> Self {
+        Self::SystemTime(st)
     }
 }
 

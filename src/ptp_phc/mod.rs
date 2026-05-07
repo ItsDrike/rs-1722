@@ -18,10 +18,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use rs_1722::ptp_phc::PtpClock;
+//! use rs_1722::ptp_phc::{PtpClockHardware, PtpTimeSource};
 //!
 //! # fn main() -> rs_1722::ptp_phc::Result<()> {
-//! let clock = PtpClock::open("/dev/ptp0")?;
+//! let clock = PtpClockHardware::open("/dev/ptp0")?;
 //! let caps = clock.capabilities()?;
 //! println!("PHC supports {} programmable pins", caps.programmable_pins);
 //! println!("Current PHC time: {}", clock.time()?);
@@ -42,7 +42,7 @@ mod time;
 pub type ExternalTimestampFlags = crate::ptp_phc::abi::PtpExttsFlags;
 
 pub use crate::ptp_phc::{
-    clock::{Capabilities, ExternalTimestampEvent, PtpClock},
+    clock::{Capabilities, ExternalTimestampEvent, PtpClock, PtpClockHardware, PtpClockSystemTime, PtpTimeSource},
     error::{Error, Result},
     pin::{Pin, PinFunction},
     time::PtpTime,
@@ -51,7 +51,7 @@ pub use crate::ptp_phc::{
 /// External timestamp edge selection.
 ///
 /// This controls which edges a PHC external-timestamp channel should capture
-/// when passed to [`PtpClock::enable_external_timestamping`].
+/// when passed to [`PtpClockHardware::enable_external_timestamping`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
     /// Timestamp rising edges.

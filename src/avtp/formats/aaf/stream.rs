@@ -10,6 +10,7 @@ use crate::avtp::{
     subtype::Subtype,
     AvtpTimestamp, Avtpdu, StreamID, PtpSynchronizedClock, ClockError,
 };
+use crate::ptp_phc::PtpTimeSource;
 
 use super::{AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate, Aaf};
 
@@ -54,17 +55,17 @@ pub struct ReceivedPcm {
 ///
 /// Manages the state of a single outgoing audio stream, including sequence numbering,
 /// PTP-synchronized timestamp generation, and packet construction.
-pub struct AafPcmTalker {
+pub struct AafPcmTalker<T: PtpTimeSource> {
     stream_id: StreamID,
     format: PcmFormat,
     sample_rate: SampleRate,
     channels: u10,
     bit_depth: NonZero<u8>,
     sequence_num: u8,
-    ptp_clock: PtpSynchronizedClock,
+    ptp_clock: PtpSynchronizedClock<T>,
 }
 
-impl AafPcmTalker {
+impl<T: PtpTimeSource> AafPcmTalker<T> {
     /// Creates a new AAF PCM talker for encoding audio packets.
     ///
     /// Timestamps are synchronized to PTP time via the provided clock.
@@ -87,7 +88,7 @@ impl AafPcmTalker {
         sample_rate: SampleRate,
         channels: u10,
         bit_depth: u8,
-        ptp_clock: PtpSynchronizedClock,
+        ptp_clock: PtpSynchronizedClock<T>,
     ) -> Result<Self, AafStreamError> {
         let bit_depth = NonZero::new(bit_depth)
             .ok_or_else(|| AafStreamError::InvalidStream("bit_depth cannot be zero".to_string()))?;
@@ -121,9 +122,9 @@ impl AafPcmTalker {
     ///
     /// Returns [`AafStreamError`] if the packet construction or clock synchronization fails.
     pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafStreamError> {
-        // Get PTP elapsed time for timestamp
-        let elapsed = self.ptp_clock.elapsed()?;
-        let avtp_timestamp = AvtpTimestamp::from(elapsed);
+        // Get synchronized absolute PTP time (monotonically increasing)
+        let ptp_time = self.ptp_clock.ptp_time()?;
+        let avtp_timestamp = AvtpTimestamp::from(ptp_time);
 
         // Create the PCM variant
         let pcm = AafPcm::new(
@@ -263,7 +264,7 @@ impl AafPcmListener {
     }
 }
 
-impl StreamTalker for AafPcmTalker {
+impl<T: PtpTimeSource + Send> StreamTalker for AafPcmTalker<T> {
     type Error = AafStreamError;
 
     fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, Self::Error> {

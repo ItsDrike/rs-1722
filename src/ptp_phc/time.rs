@@ -128,6 +128,13 @@ impl PtpTime {
         }
     }
 
+    /// Creates a timestamp from nanoseconds as a signed i64.
+    ///
+    /// Performs euclidean division to split into seconds and fractional nanoseconds.
+    ///
+    /// This method is infallible as it can never overflow the stored `i64` seconds.
+    /// If you need to convert a nanoseconds value higher than `i64::MAX`, you can use
+    /// [`Self::from_ns_i128`], which is however fallible due to potential seconds overflow.
     #[must_use]
     pub const fn from_ns(ns: i64) -> Self {
         let seconds = ns.div_euclid(NSEC_PER_SEC);
@@ -138,6 +145,29 @@ impl PtpTime {
             seconds,
             nanoseconds: unsafe { Nanoseconds::new_unchecked(nanoseconds) },
         }
+    }
+
+    /// Creates a timestamp from nanoseconds as a signed i128.
+    ///
+    /// Handles large nanosecond values without truncating to i64 prematurely.
+    /// Performs euclidean division to split into seconds and fractional nanoseconds.
+    ///
+    /// If you know you're only working with values up to `i64::MAX`, you should
+    /// instead use [`Self::from_ns`], which is infallible for those.
+    ///
+    /// Returns `None` if the seconds component overflows i64.
+    #[must_use]
+    pub fn from_ns_i128(ns: i128) -> Option<Self> {
+        let seconds = ns.div_euclid(i128::from(NSEC_PER_SEC));
+        #[expect(clippy::cast_possible_truncation)]
+        let nanoseconds = ns.rem_euclid(i128::from(NSEC_PER_SEC)) as u32;
+
+        let seconds_i64 = i64::try_from(seconds).ok()?;
+
+        Some(Self {
+            seconds: seconds_i64,
+            nanoseconds: unsafe { Nanoseconds::new_unchecked(nanoseconds) },
+        })
     }
 
     /// Converts a normalized POSIX `timespec` into a [`PtpTime`].

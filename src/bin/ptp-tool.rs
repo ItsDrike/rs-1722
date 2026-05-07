@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use rs_1722::ptp_phc::{Edge, PinFunction, PtpClock};
+use rs_1722::ptp_phc::{Edge, PinFunction, PtpClockHardware, PtpTimeSource};
 
 /// CLI entry point.
 ///
@@ -168,7 +168,7 @@ impl std::fmt::Display for CliEdge {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut clock = PtpClock::open(&args.device)?;
+    let mut clock = PtpClockHardware::open(&args.device)?;
 
     match args.command {
         Command::Caps => {
