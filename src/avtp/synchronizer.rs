@@ -1,4 +1,3 @@
-#![expect(dead_code)]
 use std::time::{Duration, Instant};
 
 use crate::ptp_phc::{PtpClock, PtpTime};
@@ -58,8 +57,8 @@ pub enum ClockError {
 ///   would introduce audible discontinuities in audio playback.
 /// - **Strict monotonicity**: Required by AVTP spec; each timestamp must be strictly
 ///   greater than the previous, which this clock enforces even across clock corrections.
-pub struct PtpSynchronizedClock<'a> {
-    clock: &'a PtpClock,
+pub struct PtpSynchronizedClock {
+    clock: PtpClock,
 
     /// Initial PTP time (reference point for elapsed calculations)
     initial_ptp_time: PtpTime,
@@ -90,24 +89,27 @@ pub struct PtpSynchronizedClock<'a> {
     resync_interval: Duration,
 }
 
-impl<'a> PtpSynchronizedClock<'a> {
+impl PtpSynchronizedClock {
     /// Creates a new PLL clock synchronized to the given PTP clock.
     ///
+    /// Takes ownership of the clock device.
     /// Uses a default resync interval of 100ms, which provides good balance between
     /// PTP clock read frequency and synchronization tightness.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial PTP clock read fails.
-    pub fn new(clock: &'a PtpClock) -> Result<Self, ClockError> {
+    pub fn new(clock: PtpClock) -> Result<Self, ClockError> {
         Self::with_resync_interval(clock, Duration::from_millis(100))
     }
 
     /// Creates a new PLL clock with a custom resync interval.
     ///
+    /// Takes ownership of the clock device.
+    ///
     /// # Arguments
     ///
-    /// - `clock`: Reference to the PTP clock device
+    /// - `clock`: The PTP clock device (owned)
     /// - `resync_interval`: Time between PTP resyncs. Ensures the PLL stays synchronized
     ///   even if the caller goes idle.
     ///   - Smaller (10-50ms): tighter sync but more frequent PTP reads
@@ -117,7 +119,7 @@ impl<'a> PtpSynchronizedClock<'a> {
     /// # Errors
     ///
     /// Returns an error if the initial PTP clock read fails.
-    pub fn with_resync_interval(clock: &'a PtpClock, resync_interval: Duration) -> Result<Self, ClockError> {
+    pub fn with_resync_interval(clock: PtpClock, resync_interval: Duration) -> Result<Self, ClockError> {
         let initial_ptp_time = clock.time()?;
         let now = Instant::now();
         Ok(Self {

@@ -1,6 +1,5 @@
 use std::num::NonZero;
 use std::sync::Arc;
-use std::time::Instant;
 
 use arbitrary_int::prelude::*;
 use thiserror::Error;
@@ -9,7 +8,7 @@ use crate::avtp::{
     headers::{CommonHeader, GenericStreamData},
     stream::{StreamFilter, StreamListener, StreamTalker},
     subtype::Subtype,
-    AvtpTimestamp, Avtpdu, StreamID,
+    AvtpTimestamp, Avtpdu, StreamID, PtpSynchronizedClock, ClockError,
 };
 
 use super::{AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate, Aaf};
@@ -25,6 +24,9 @@ pub enum AafStreamError {
 
     #[error(transparent)]
     InvalidAaf(#[from] InvalidAaf),
+
+    #[error("PTP clock error: {0}")]
+    Clock(#[from] ClockError),
 }
 
 /// Received PCM audio frame from an AVTP stream.
@@ -51,7 +53,7 @@ pub struct ReceivedPcm {
 /// Encodes PCM audio into AAF AVTP packets.
 ///
 /// Manages the state of a single outgoing audio stream, including sequence numbering,
-/// timestamp generation, and packet construction.
+/// PTP-synchronized timestamp generation, and packet construction.
 pub struct AafPcmTalker {
     stream_id: StreamID,
     format: PcmFormat,
@@ -59,11 +61,13 @@ pub struct AafPcmTalker {
     channels: u10,
     bit_depth: NonZero<u8>,
     sequence_num: u8,
-    start_time: Instant,
+    ptp_clock: PtpSynchronizedClock,
 }
 
 impl AafPcmTalker {
     /// Creates a new AAF PCM talker for encoding audio packets.
+    ///
+    /// Timestamps are synchronized to PTP time via the provided clock.
     ///
     /// # Arguments
     ///
@@ -72,6 +76,7 @@ impl AafPcmTalker {
     /// - `sample_rate`: The audio sample rate.
     /// - `channels`: The number of audio channels per frame.
     /// - `bit_depth`: The number of valid bits per sample.
+    /// - `ptp_clock`: PTP synchronized clock for drift-free timestamp generation.
     ///
     /// # Errors
     ///
@@ -82,6 +87,7 @@ impl AafPcmTalker {
         sample_rate: SampleRate,
         channels: u10,
         bit_depth: u8,
+        ptp_clock: PtpSynchronizedClock,
     ) -> Result<Self, AafStreamError> {
         let bit_depth = NonZero::new(bit_depth)
             .ok_or_else(|| AafStreamError::InvalidStream("bit_depth cannot be zero".to_string()))?;
@@ -99,13 +105,13 @@ impl AafPcmTalker {
             channels,
             bit_depth,
             sequence_num: 0,
-            start_time: Instant::now(),
+            ptp_clock,
         })
     }
 
     /// Builds and returns the next AVTP packet for transmission.
     ///
-    /// Updates the sequence number and timestamp on each call.
+    /// Updates the sequence number and PTP-synchronized timestamp on each call.
     ///
     /// # Arguments
     ///
@@ -113,10 +119,11 @@ impl AafPcmTalker {
     ///
     /// # Errors
     ///
-    /// Returns [`AafStreamError`] if the packet construction fails.
+    /// Returns [`AafStreamError`] if the packet construction or clock synchronization fails.
     pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafStreamError> {
-        // Compute the AVTP timestamp from the elapsed time since stream start
-        let avtp_timestamp = AvtpTimestamp::from(self.start_time.elapsed());
+        // Get PTP elapsed time for timestamp
+        let elapsed = self.ptp_clock.elapsed()?;
+        let avtp_timestamp = AvtpTimestamp::from(elapsed);
 
         // Create the PCM variant
         let pcm = AafPcm::new(
