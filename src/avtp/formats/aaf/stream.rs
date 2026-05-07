@@ -69,6 +69,8 @@ pub struct AafPcmTalker<T: PtpTimeSource> {
     bit_depth: NonZero<u8>,
     sequence_num: u8,
     ptp_clock: PtpSynchronizedClock<T>,
+    /// Presentation delay in nanoseconds, added to the PTP time for AVTP timestamps.
+    playback_delay_ns: u32,
 }
 
 impl<T: PtpTimeSource> AafPcmTalker<T> {
@@ -84,6 +86,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
     /// - `channels`: The number of audio channels per frame.
     /// - `bit_depth`: The number of valid bits per sample.
     /// - `ptp_clock`: PTP synchronized clock for drift-free timestamp generation.
+    /// - `playback_delay_ms`: Presentation delay in milliseconds to add to AVTP timestamps.
     ///
     /// # Errors
     ///
@@ -95,6 +98,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
         channels: u10,
         bit_depth: u8,
         ptp_clock: PtpSynchronizedClock<T>,
+        playback_delay_ms: u32,
     ) -> Result<Self, AafStreamError> {
         let bit_depth = NonZero::new(bit_depth)
             .ok_or_else(|| AafStreamError::InvalidStream("bit_depth cannot be zero".to_string()))?;
@@ -113,6 +117,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
             bit_depth,
             sequence_num: 0,
             ptp_clock,
+            playback_delay_ns: playback_delay_ms * 1_000_000,
         })
     }
 
@@ -130,7 +135,10 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
     pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafStreamError> {
         // Get synchronized absolute PTP time (monotonically increasing)
         let ptp_time = self.ptp_clock.ptp_time()?;
-        let avtp_timestamp = AvtpTimestamp::from(ptp_time);
+        // Add presentation delay and convert to AVTP timestamp (32-bit with wraparound)
+        let avtp_timestamp = AvtpTimestamp::from(ptp_time).as_u32()
+            .wrapping_add(self.playback_delay_ns);
+        let avtp_timestamp = AvtpTimestamp::from(avtp_timestamp);
 
         // Create the PCM variant
         let pcm = AafPcm::new(
