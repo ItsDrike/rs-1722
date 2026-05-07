@@ -35,6 +35,12 @@ pub enum AafStreamError {
 /// Contains the raw audio payload and metadata about the frame.
 #[derive(Debug, Clone)]
 pub struct ReceivedPcm {
+    /// AVTP presentation timestamp (absolute gPTP time mod 2^32 nanoseconds).
+    pub avtp_timestamp: AvtpTimestamp,
+
+    /// AVTP stream sequence number.
+    pub seq_num: u8,
+
     /// Big-endian encoded PCM audio samples, ready for byte-order conversion.
     pub payload_be: Arc<[u8]>,
 
@@ -255,6 +261,8 @@ impl AafPcmListener {
         };
 
         Ok(Some(ReceivedPcm {
+            avtp_timestamp: aaf.stream_data().avtp_timestamp(),
+            seq_num,
             payload_be: Arc::from(aaf_pcm.payload_slice()),
             sample_rate: aaf_pcm.nominal_sample_rate(),
             channels: aaf_pcm.channels_per_frame(),
