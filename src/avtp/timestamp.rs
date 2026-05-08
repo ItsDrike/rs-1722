@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::ptp_phc::PtpTime;
+
 /// 32-bit AVTP presentation timestamp in nanoseconds.
 ///
 /// Derived from absolute gPTP time using the formula:
@@ -40,6 +42,38 @@ impl AvtpTimestamp {
     #[must_use]
     pub const fn wrapping_add(self, rhs: u32) -> Self {
         Self(self.0.wrapping_add(rhs))
+    }
+
+    /// Expand this wrapping 32-bit AVTP timestamp to the absolute [`PtpTime`]
+    /// nearest to a reference time.
+    ///
+    /// This relies on the assumption that the reference time is synchronized to
+    /// the same underlying PTP timeline and is within one AVTP wrap window
+    /// (`2^32` ns, about 4.29 s) of the intended absolute timestamp.
+    ///
+    /// # Panics
+    /// Panics if internal arithmetic produces a timestamp that cannot be represented
+    /// as [`PtpTime`]. This should be unreachable for valid [`PtpTime`] references.
+    #[must_use]
+    pub fn expand_near(self, reference_time: PtpTime) -> PtpTime {
+        const AVTP_WRAP_NS: i128 = 1_i128 << 32;
+
+        let reference_ns = reference_time.as_nanos();
+        let base_cycles = reference_ns.div_euclid(AVTP_WRAP_NS);
+        let base_candidate = base_cycles * AVTP_WRAP_NS + i128::from(self.0);
+
+        let candidates = [
+            base_candidate - AVTP_WRAP_NS,
+            base_candidate,
+            base_candidate + AVTP_WRAP_NS,
+        ];
+
+        let expanded_ns = candidates
+            .into_iter()
+            .min_by_key(|candidate| (candidate - reference_ns).abs())
+            .expect("candidate set is non-empty");
+
+        PtpTime::from_ns_i128(expanded_ns).expect("expanded AVTP timestamp should always fit within PtpTime range")
     }
 }
 
@@ -103,11 +137,23 @@ impl std::fmt::Display for AvtpTimestamp {
 #[cfg(test)]
 mod tests {
     use super::AvtpTimestamp;
+    use crate::ptp_phc::PtpTime;
 
     #[test]
     fn addition_wraps_like_avtp_timestamps() {
         let timestamp = AvtpTimestamp::from(u32::MAX - 1);
 
         assert_eq!((timestamp + 3).as_u32(), 1);
+    }
+
+    #[test]
+    fn expansion_chooses_absolute_time_near_reference() {
+        let reference = PtpTime::from_ns_i128((5_i128 << 32) + 123).unwrap();
+        let timestamp = AvtpTimestamp::from(456_u32);
+
+        assert_eq!(
+            timestamp.expand_near(reference),
+            PtpTime::from_ns_i128((5_i128 << 32) + 456).unwrap()
+        );
     }
 }

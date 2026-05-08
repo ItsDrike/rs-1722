@@ -604,7 +604,7 @@ fn drain_loop(
         }) = event_rx.try_recv()
         {
             jitter_buf.push(Reverse(Buffered {
-                presentation_time: expand_avtp_timestamp(pcm.avtp_timestamp.as_u32(), phc_time_at_receive),
+                presentation_time: pcm.avtp_timestamp.expand_near(phc_time_at_receive),
                 phc_time_at_receive,
                 pcm,
             }));
@@ -787,25 +787,4 @@ fn swap_byte_order(buf: &mut [u8], word_size: usize) {
     for chunk in buf.chunks_exact_mut(word_size) {
         chunk.reverse();
     }
-}
-
-fn expand_avtp_timestamp(avtp_timestamp: u32, reference_time: PtpTime) -> PtpTime {
-    const AVTP_WRAP_NS: i128 = 1_i128 << 32;
-
-    let reference_ns = reference_time.as_nanos();
-    let base_cycles = reference_ns.div_euclid(AVTP_WRAP_NS);
-    let base_candidate = base_cycles * AVTP_WRAP_NS + i128::from(avtp_timestamp);
-
-    let candidates = [
-        base_candidate - AVTP_WRAP_NS,
-        base_candidate,
-        base_candidate + AVTP_WRAP_NS,
-    ];
-
-    let expanded_ns = candidates
-        .into_iter()
-        .min_by_key(|candidate| (candidate - reference_ns).abs())
-        .expect("candidate set is non-empty");
-
-    PtpTime::from_ns_i128(expanded_ns).expect("expanded AVTP timestamp should always fit within PtpTime range")
 }
