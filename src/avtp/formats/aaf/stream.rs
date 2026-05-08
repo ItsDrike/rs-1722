@@ -15,17 +15,21 @@ use crate::ptp_phc::PtpTimeSource;
 use super::pcm::InvalidPcmAaf;
 use super::{Aaf, AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate};
 
-/// Errors that can occur during AAF stream encoding or decoding.
+/// Errors that can occur when configuring an [`AafPcmTalker`].
 #[derive(Error, Debug)]
-pub enum AafStreamError {
-    #[error("Invalid stream configuration: {0}")]
-    InvalidStream(String),
+pub enum AafPcmTalkerConfigError {
+    #[error("bit_depth cannot be zero")]
+    BitDepthZero,
 
-    #[error("Failed to construct AAF packet: {0}")]
-    AafConstruction(String),
+    #[error("channels must be at least 1")]
+    ChannelsPerFrameZero,
+}
 
+/// Errors that can occur when building an outgoing AAF PCM AVTP packet.
+#[derive(Error, Debug)]
+pub enum AafPcmTalkerError {
     #[error(transparent)]
-    InvalidAaf(#[from] InvalidAaf),
+    Pcm(#[from] InvalidPcmAaf),
 
     #[error("PTP clock error: {0}")]
     Clock(#[from] ClockError),
@@ -53,6 +57,9 @@ pub struct ReceivedPcm {
 
     /// Number of valid bits per sample.
     pub bit_depth: NonZero<u8>,
+
+    /// Sample word container format used in the AVTP payload.
+    pub format: PcmFormat,
 
     /// Number of packets lost before this one (sequence number gap).
     pub packets_lost: u32,
@@ -91,7 +98,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`AafStreamError`] if the configuration is invalid.
+    /// Returns [`AafPcmTalkerConfigError`] if the supplied talker configuration is invalid.
     pub fn new(
         stream_id: StreamID,
         format: PcmFormat,
@@ -100,14 +107,11 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
         bit_depth: u8,
         ptp_clock: PtpSynchronizedClock<T>,
         playback_delay_ms: u32,
-    ) -> Result<Self, AafStreamError> {
-        let bit_depth = NonZero::new(bit_depth)
-            .ok_or_else(|| AafStreamError::InvalidStream("bit_depth cannot be zero".to_string()))?;
+    ) -> Result<Self, AafPcmTalkerConfigError> {
+        let bit_depth = NonZero::new(bit_depth).ok_or(AafPcmTalkerConfigError::BitDepthZero)?;
 
         if channels.value() == 0 {
-            return Err(AafStreamError::InvalidStream(
-                "channels must be at least 1".to_string(),
-            ));
+            return Err(AafPcmTalkerConfigError::ChannelsPerFrameZero);
         }
 
         Ok(Self {
@@ -132,8 +136,8 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`AafStreamError`] if the packet construction or clock synchronization fails.
-    pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafStreamError> {
+    /// Returns [`AafPcmTalkerError`] if packet construction or clock synchronization fails.
+    pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafPcmTalkerError> {
         // Get synchronized absolute PTP time (monotonically increasing)
         let ptp_time = self.ptp_clock.ptp_time()?;
         // Add presentation delay and convert to AVTP timestamp (32-bit with wraparound)
@@ -146,8 +150,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
             self.format,
             self.bit_depth.get(),
             payload,
-        )
-        .map_err(|e| AafStreamError::AafConstruction(e.to_string()))?;
+        )?;
 
         let aaf_variant = AafVariant::Pcm(pcm);
 
@@ -169,10 +172,10 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
             avtp_timestamp,
         );
 
-        // Build the AAF payload
-        let aaf =
-            Aaf::new(generic, aaf_variant, false, u4::new(0))
-                .map_err(|e| AafStreamError::AafConstruction(format!("{e:?}")))?;
+        // `Aaf::new` validates only the stream-level invariants below, all of which we set
+        // explicitly to valid AAF values in this function.
+        let aaf = Aaf::new(generic, aaf_variant, false, u4::new(0))
+            .expect("internal bug: AAF talker constructed invalid stream metadata");
 
         // Convert to wire format and increment sequence number
         let stream_header = aaf.into();
@@ -228,18 +231,15 @@ impl AafPcmListener {
     ///
     /// # Errors
     ///
-    /// Returns [`AafStreamError`] if the packet fails to parse as AAF.
-    pub fn process(&mut self, pdu: &Avtpdu) -> Result<Option<ReceivedPcm>, AafStreamError> {
+    /// Returns [`InvalidAaf`] if the packet fails to parse as AAF.
+    pub fn process(&mut self, pdu: &Avtpdu) -> Result<Option<ReceivedPcm>, InvalidAaf> {
         // Only process Stream PDUs
         let Avtpdu::Stream(stream_header) = pdu else {
             return Ok(None);
         };
 
         // Parse as AAF
-        let aaf: Aaf = stream_header
-            .clone()
-            .try_into()
-            .map_err(|e: InvalidAaf| AafStreamError::InvalidAaf(e))?;
+        let aaf: Aaf = stream_header.clone().try_into()?;
 
         // Check stream ID filter
         let stream_id = aaf.stream_data().stream_id();
@@ -274,13 +274,14 @@ impl AafPcmListener {
             sample_rate: aaf_pcm.nominal_sample_rate(),
             channels: aaf_pcm.channels_per_frame(),
             bit_depth: aaf_pcm.bit_depth(),
+            format: aaf_pcm.format(),
             packets_lost,
         }))
     }
 }
 
 impl<T: PtpTimeSource + Send> StreamTalker for AafPcmTalker<T> {
-    type Error = AafStreamError;
+    type Error = AafPcmTalkerError;
 
     fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, Self::Error> {
         Self::build_packet(self, payload)
@@ -289,9 +290,58 @@ impl<T: PtpTimeSource + Send> StreamTalker for AafPcmTalker<T> {
 
 impl StreamListener for AafPcmListener {
     type Output = ReceivedPcm;
-    type Error = AafStreamError;
+    type Error = InvalidAaf;
 
     fn process(&mut self, pdu: &Avtpdu) -> Result<Option<Self::Output>, Self::Error> {
         Self::process(self, pdu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pnet::util::MacAddr;
+
+    use super::*;
+    use crate::ptp_phc::PtpClockSystemTime;
+
+    fn test_clock() -> PtpSynchronizedClock<PtpClockSystemTime> {
+        PtpSynchronizedClock::new(PtpClockSystemTime::new()).expect("system time clock should initialize")
+    }
+
+    fn test_stream_id() -> StreamID {
+        StreamID {
+            mac_address: MacAddr::new(0, 1, 2, 3, 4, 5),
+            unique_id: 1,
+        }
+    }
+
+    #[test]
+    fn talker_new_reports_zero_bit_depth_structurally() {
+        let result = AafPcmTalker::new(
+            test_stream_id(),
+            PcmFormat::Int16Bit,
+            SampleRate::KHz48,
+            u10::new(2),
+            0,
+            test_clock(),
+            50,
+        );
+
+        assert!(matches!(result, Err(AafPcmTalkerConfigError::BitDepthZero)));
+    }
+
+    #[test]
+    fn talker_new_reports_zero_channels_structurally() {
+        let result = AafPcmTalker::new(
+            test_stream_id(),
+            PcmFormat::Int16Bit,
+            SampleRate::KHz48,
+            u10::new(0),
+            16,
+            test_clock(),
+            50,
+        );
+
+        assert!(matches!(result, Err(AafPcmTalkerConfigError::ChannelsPerFrameZero)));
     }
 }

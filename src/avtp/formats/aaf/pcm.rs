@@ -132,7 +132,10 @@ impl PcmFormat {
 #[repr(u8)] // u4 actually
 /// Nominal sample rate of the PCM stream.
 ///
-/// Encoded as a compact value in the AAF header.
+/// The discriminants match the protocol-level `nsr` field values used by AAF.
+/// The wire format stores this in a 4-bit field, but Rust enum representations
+/// are byte-based, so conversions to and from the on-wire `u4` are provided
+/// explicitly below.
 pub enum SampleRate {
     UserSpecified = 0x0,
     KHz8 = 0x1,
@@ -148,11 +151,29 @@ pub enum SampleRate {
 }
 
 impl SampleRate {
+    /// Convert a numeric sample rate in hertz to the corresponding AAF encoding.
+    #[must_use]
+    pub const fn from_hz(rate_hz: u32) -> Option<Self> {
+        match rate_hz {
+            8_000 => Some(Self::KHz8),
+            16_000 => Some(Self::KHz16),
+            24_000 => Some(Self::KHz24),
+            32_000 => Some(Self::KHz32),
+            44_100 => Some(Self::KHz44_1),
+            48_000 => Some(Self::KHz48),
+            88_200 => Some(Self::KHz88_2),
+            96_000 => Some(Self::KHz96),
+            176_400 => Some(Self::KHz176_4),
+            192_000 => Some(Self::KHz192),
+            _ => None,
+        }
+    }
+
     #[must_use]
     /// Returns the numeric sample rate in Hz (hertz).
     ///
     /// Returns `None` if the rate is user-defined.
-    pub const fn rate(&self) -> Option<usize> {
+    pub const fn rate(&self) -> Option<u32> {
         match self {
             Self::UserSpecified => None,
             Self::KHz8 => Some(8_000),
@@ -166,6 +187,12 @@ impl SampleRate {
             Self::KHz192 => Some(192_000),
             Self::KHz24 => Some(24_000),
         }
+    }
+
+    /// Return this sample rate's protocol-level `nsr` field value.
+    #[must_use]
+    pub const fn protocol_value(self) -> u4 {
+        u4::new(self as u8)
     }
 }
 
@@ -312,8 +339,7 @@ impl AafPcm {
     ///
     /// Reserved fields will be dropped.
     pub(super) fn from_specific(data: AafSpecificData) -> Result<Self, InvalidPcmAaf> {
-        let format =
-            PcmFormat::try_from(data.format as u8).map_err(|_| InvalidPcmAaf::NonPcmFormat(data.format))?;
+        let format = PcmFormat::try_from(data.format as u8).map_err(|_| InvalidPcmAaf::NonPcmFormat(data.format))?;
 
         let mut reader = BitReader::endian(&data.aaf_format_specific_data_1[..], BigEndian);
 
@@ -352,7 +378,9 @@ impl AafPcm {
     pub(super) fn into_specific(self) -> AafSpecificData {
         let mut aaf_format_specific_data_1 = [0u8; 3];
         let mut writer = BitWriter::endian(&mut aaf_format_specific_data_1[..], BigEndian);
-        writer.write::<4, _>(self.nominal_sample_rate as u8).unwrap();
+        writer
+            .write::<4, _>(self.nominal_sample_rate.protocol_value().value())
+            .unwrap();
         writer.write::<2, _>(0).unwrap(); // reserved
         writer.write::<10, _>(self.channels_per_frame.value()).unwrap();
         writer.write::<8, _>(self.bit_depth.get()).unwrap();
@@ -434,5 +462,24 @@ impl AafPcm {
         let frame_size = word_size_bytes * channels;
         debug_assert_eq!(self.payload.len() % frame_size, 0); // validated invariant
         Some(self.payload.len() / frame_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SampleRate;
+
+    #[test]
+    fn sample_rate_from_hz_maps_semantic_rate() {
+        assert_eq!(SampleRate::from_hz(48_000), Some(SampleRate::KHz48));
+        assert_eq!(SampleRate::from_hz(44_100), Some(SampleRate::KHz44_1));
+    }
+
+    #[test]
+    fn sample_rate_protocol_and_hz_conversions_are_distinct() {
+        assert_eq!(SampleRate::try_from(0x5_u8), Ok(SampleRate::KHz48));
+        assert_eq!(SampleRate::from_hz(0x5), None);
+        assert_eq!(SampleRate::KHz48.protocol_value().value(), 0x5);
+        assert_eq!(SampleRate::KHz48.rate(), Some(48_000));
     }
 }
