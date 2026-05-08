@@ -137,6 +137,10 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
     /// # Errors
     ///
     /// Returns [`AafPcmTalkerError`] if packet construction or clock synchronization fails.
+    ///
+    /// # Panics
+    /// Panics if this function constructs stream metadata that violates the AAF invariants
+    /// enforced by [`Aaf::new`]. That would indicate an internal bug in this encoder.
     pub fn build_packet(&mut self, payload: Arc<[u8]>) -> Result<Avtpdu, AafPcmTalkerError> {
         // Get synchronized absolute PTP time (monotonically increasing)
         let ptp_time = self.ptp_clock.ptp_time()?;
