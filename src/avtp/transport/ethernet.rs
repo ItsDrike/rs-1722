@@ -129,6 +129,22 @@ impl EthernetAvtpReceiver {
     /// Returns [`EthernetReceiverError::Receive`] if frame reception fails.
     /// Returns [`EthernetReceiverError::Parse`] if the AVTP packet cannot be parsed.
     pub fn recv_next(&mut self) -> Result<Avtpdu, EthernetReceiverError> {
+        self.recv_next_with(|| ()).map(|((), avtpdu)| avtpdu)
+    }
+
+    /// Receives the next AVTP packet and captures caller-provided metadata at frame receipt time.
+    ///
+    /// This is useful when the caller needs to timestamp or otherwise annotate the frame
+    /// immediately after it is read from the socket but before AVTP parsing work begins.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EthernetReceiverError::Receive`] if frame reception fails.
+    /// Returns [`EthernetReceiverError::Parse`] if the AVTP packet cannot be parsed.
+    pub fn recv_next_with<T>(
+        &mut self,
+        mut on_frame_received: impl FnMut() -> T,
+    ) -> Result<(T, Avtpdu), EthernetReceiverError> {
         loop {
             let frame = self.rx.next().map_err(EthernetReceiverError::Receive)?;
 
@@ -143,8 +159,9 @@ impl EthernetAvtpReceiver {
             }
 
             let payload = &frame[14..];
+            let metadata = on_frame_received();
             let mut cursor = Cursor::new(payload);
-            return Ok(Avtpdu::read(&mut cursor)?);
+            return Ok((metadata, Avtpdu::read(&mut cursor)?));
         }
     }
 }
