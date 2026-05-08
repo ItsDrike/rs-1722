@@ -35,6 +35,26 @@ impl AvtpTimestamp {
     pub const fn into_u32(self) -> u32 {
         self.0
     }
+
+    /// Adds nanoseconds to this timestamp using AVTP's 32-bit wraparound semantics.
+    #[must_use]
+    pub const fn wrapping_add(self, rhs: u32) -> Self {
+        Self(self.0.wrapping_add(rhs))
+    }
+}
+
+impl std::ops::Add<u32> for AvtpTimestamp {
+    type Output = Self;
+
+    fn add(self, rhs: u32) -> Self::Output {
+        self.wrapping_add(rhs)
+    }
+}
+
+impl std::ops::AddAssign<u32> for AvtpTimestamp {
+    fn add_assign(&mut self, rhs: u32) {
+        *self = self.wrapping_add(rhs);
+    }
 }
 
 impl From<u32> for AvtpTimestamp {
@@ -77,5 +97,17 @@ impl From<crate::ptp_phc::PtpTime> for AvtpTimestamp {
 impl std::fmt::Display for AvtpTimestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ns", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AvtpTimestamp;
+
+    #[test]
+    fn addition_wraps_like_avtp_timestamps() {
+        let timestamp = AvtpTimestamp::from(u32::MAX - 1);
+
+        assert_eq!((timestamp + 3).as_u32(), 1);
     }
 }

@@ -5,14 +5,15 @@ use arbitrary_int::prelude::*;
 use thiserror::Error;
 
 use crate::avtp::{
+    AvtpTimestamp, Avtpdu, ClockError, PtpSynchronizedClock, StreamID,
     headers::{CommonHeader, GenericStreamData},
     stream::{StreamFilter, StreamListener, StreamTalker},
     subtype::Subtype,
-    AvtpTimestamp, Avtpdu, StreamID, PtpSynchronizedClock, ClockError,
 };
 use crate::ptp_phc::PtpTimeSource;
 
-use super::{AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate, Aaf};
+use super::pcm::InvalidPcmAaf;
+use super::{Aaf, AafPcm, AafVariant, InvalidAaf, PcmFormat, SampleRate};
 
 /// Errors that can occur during AAF stream encoding or decoding.
 #[derive(Error, Debug)]
@@ -136,9 +137,7 @@ impl<T: PtpTimeSource> AafPcmTalker<T> {
         // Get synchronized absolute PTP time (monotonically increasing)
         let ptp_time = self.ptp_clock.ptp_time()?;
         // Add presentation delay and convert to AVTP timestamp (32-bit with wraparound)
-        let avtp_timestamp = AvtpTimestamp::from(ptp_time).as_u32()
-            .wrapping_add(self.playback_delay_ns);
-        let avtp_timestamp = AvtpTimestamp::from(avtp_timestamp);
+        let avtp_timestamp = AvtpTimestamp::from(ptp_time) + self.playback_delay_ns;
 
         // Create the PCM variant
         let pcm = AafPcm::new(
