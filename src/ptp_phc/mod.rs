@@ -35,6 +35,8 @@ mod error;
 mod pin;
 mod time;
 
+pub mod device;
+
 /// Bitflags reported for external timestamp capture requests and events.
 ///
 /// This is the public flag type used by [`ExternalTimestampEvent::flags`] and
