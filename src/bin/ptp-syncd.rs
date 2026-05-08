@@ -8,17 +8,35 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pnet::datalink::{NetworkInterface, interfaces};
+use clap::Parser;
+use pnet::datalink::NetworkInterface;
+use rs_1722::bin_utils::require_interface;
 use rs_1722::ptp_proto::instance::{PtpInstance, PtpQueryError, PtpRole};
 use rs_1722::ptp_proto::state::{PortState, PtpSnapshot};
 use tracing::{debug, error, info, info_span, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-const MASTER_INTERFACE: &str = "enp1s0";
-const SLAVE_INTERFACE: &str = "enp3s0";
 const UNSYNCHRONIZED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SYNCHRONIZED_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEGRADED_STATUS_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Parser)]
+#[command(name = "ptp-syncd")]
+#[command(about = "Monitor paired master/slave ptp4l instances")]
+#[command(after_help = "EXAMPLES:
+
+  Monitor a master/slave ptp4l pair:
+    ptp-syncd --master-interface enp1s0 --slave-interface enp3s0
+")]
+struct Args {
+    /// Network interface used by the master ptp4l instance.
+    #[arg(long)]
+    master_interface: String,
+
+    /// Network interface used by the slave ptp4l instance.
+    #[arg(long)]
+    slave_interface: String,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum SlaveSyncState {
@@ -52,10 +70,11 @@ struct MonitorState {
 /// Starts PTP instances, waits for initial slave synchronization,
 /// then runs the monitoring loop until shutdown is requested.
 fn main() {
+    let args = Args::parse();
     init_tracing();
 
-    let master_iface = validated_interface(MASTER_INTERFACE);
-    let slave_iface = validated_interface(SLAVE_INTERFACE);
+    let master_iface = validated_interface(&args.master_interface);
+    let slave_iface = validated_interface(&args.slave_interface);
 
     debug!("network interfaces validated");
 
@@ -96,10 +115,7 @@ fn main() {
 
 /// Returns a validated network interface or terminates the process.
 fn validated_interface(name: &str) -> NetworkInterface {
-    interfaces()
-        .into_iter()
-        .find(|interface| interface.name == name)
-        .unwrap_or_else(|| fatal(&format!("interface {name} does not exist")))
+    require_interface(name).unwrap_or_else(|e| fatal(&format!("failed to validate interface {name}: {e}")))
 }
 
 /// Installs a Ctrl+C handler and returns the shared shutdown flag.

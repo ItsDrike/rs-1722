@@ -43,7 +43,7 @@ impl fmt::Display for ClockSource {
 
 /// Error type for validated interface initialization.
 #[derive(Debug, Error)]
-pub enum ValidatedInterfaceError {
+pub enum InterfaceValidationError {
     /// The interface does not exist.
     #[error("Interface '{0}' not found")]
     InterfaceNotFound(String),
@@ -56,13 +56,20 @@ pub enum ValidatedInterfaceError {
     #[error("Interface '{0}' is not up")]
     InterfaceDown(String),
 
-    /// No PTP device found.
-    #[error("No PTP device found for interface '{0}'")]
-    NoPtpDevice(String),
-
     /// Failed to open PTP clock.
     #[error("Failed to open PTP clock for interface '{0}': {1}")]
     PtpOpenFailed(String, ptp_phc::Error),
+}
+
+/// Error type for validated interface initialization with a resolved clock source.
+#[derive(Debug, Error)]
+pub enum ValidatedInterfaceError {
+    #[error(transparent)]
+    Interface(#[from] InterfaceValidationError),
+
+    /// No PTP device found.
+    #[error("No PTP device found for interface '{0}'")]
+    NoPtpDevice(String),
 }
 
 /// Find a network interface by name.
@@ -71,6 +78,21 @@ pub enum ValidatedInterfaceError {
 #[must_use]
 pub fn find_interface(name: &str) -> Option<NetworkInterface> {
     pnet::datalink::interfaces().into_iter().find(|i| i.name == name)
+}
+
+/// Find and validate that a network interface exists and is up.
+///
+/// # Errors
+/// Returns [`InterfaceValidationError`] if the interface is missing or administratively down.
+pub fn require_interface(name: &str) -> Result<NetworkInterface, InterfaceValidationError> {
+    let interface =
+        find_interface(name).ok_or_else(|| InterfaceValidationError::InterfaceNotFound(name.to_string()))?;
+
+    if !interface.is_up() {
+        return Err(InterfaceValidationError::InterfaceDown(name.to_string()));
+    }
+
+    Ok(interface)
 }
 
 /// A validated network interface with an opened PTP clock.
@@ -138,22 +160,35 @@ impl ValidatedInterface {
         Self::with_clock_source(name, ClockSource::SystemTime)
     }
 
-    fn with_clock_source(name: &str, clock_source: ClockSource) -> Result<Self, ValidatedInterfaceError> {
-        let interface =
-            find_interface(name).ok_or_else(|| ValidatedInterfaceError::InterfaceNotFound(name.to_string()))?;
-
-        if !interface.is_up() {
-            return Err(ValidatedInterfaceError::InterfaceDown(name.to_string()));
+    /// Resolve CLI-style time-source selection for a single interface.
+    ///
+    /// # Errors
+    /// Returns a [`ValidatedInterfaceError`] if interface validation or clock resolution fails.
+    pub fn from_time_args(
+        name: &str,
+        explicit_ptp: Option<&Path>,
+        system_time: bool,
+    ) -> Result<Self, ValidatedInterfaceError> {
+        if system_time {
+            Self::with_system_time(name)
+        } else if let Some(path) = explicit_ptp {
+            Self::with_explicit_ptp(name, path)
+        } else {
+            Self::new(name)
         }
+    }
+
+    fn with_clock_source(name: &str, clock_source: ClockSource) -> Result<Self, ValidatedInterfaceError> {
+        let interface = require_interface(name)?;
 
         if interface.mac.is_none() {
-            return Err(ValidatedInterfaceError::NoMacAddress(name.to_string()));
+            return Err(InterfaceValidationError::NoMacAddress(name.to_string()).into());
         }
 
         if let ClockSource::PtpDevice(path) = &clock_source {
             clock_source
                 .open_clock()
-                .map_err(|e| ValidatedInterfaceError::PtpOpenFailed(name.to_string(), e))?;
+                .map_err(|e| InterfaceValidationError::PtpOpenFailed(name.to_string(), e))?;
 
             debug_assert!(path.is_absolute());
         }
@@ -195,7 +230,7 @@ impl ValidatedInterface {
     pub fn open_clock(&self) -> Result<PtpClock, ValidatedInterfaceError> {
         self.clock_source
             .open_clock()
-            .map_err(|e| ValidatedInterfaceError::PtpOpenFailed(self.interface.name.clone(), e))
+            .map_err(|e| InterfaceValidationError::PtpOpenFailed(self.interface.name.clone(), e).into())
     }
 
     /// Get the interface name.

@@ -273,14 +273,8 @@ fn validate_interface(
     explicit_ptp: Option<&Path>,
     role: &str,
 ) -> anyhow::Result<ValidatedInterface> {
-    if system_time {
-        ValidatedInterface::with_system_time(name)
-    } else if let Some(path) = explicit_ptp {
-        ValidatedInterface::with_explicit_ptp(name, path)
-    } else {
-        ValidatedInterface::new(name)
-    }
-    .map_err(|e| anyhow::anyhow!("Failed to validate {role} interface: {e}"))
+    ValidatedInterface::from_time_args(name, explicit_ptp, system_time)
+        .map_err(|e| anyhow::anyhow!("Failed to validate {role} interface: {e}"))
 }
 
 fn setup_output_dir(args: &Args) -> anyhow::Result<PathBuf> {
