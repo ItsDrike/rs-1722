@@ -324,7 +324,9 @@ impl PtpClockHardware {
         let event_bytes =
             unsafe { std::slice::from_raw_parts_mut((&raw mut event).cast::<u8>(), mem::size_of::<PtpExttsEvent>()) };
 
-        self.device.read_exact(event_bytes).map_err(Error::ReadExternalTimestamp)?;
+        self.device
+            .read_exact(event_bytes)
+            .map_err(Error::ReadExternalTimestamp)?;
 
         Ok(ExternalTimestampEvent {
             timestamp: PtpTime::from_abi(event.t),
@@ -542,18 +544,12 @@ impl PtpClock {
         let path = path.as_ref().to_path_buf();
 
         match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(device) => Ok(Self::Hardware(PtpClockHardware {
-                device,
-                path,
-            })),
+            Ok(device) => Ok(Self::Hardware(PtpClockHardware { device, path })),
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     Ok(Self::SystemTime(PtpClockSystemTime))
                 } else {
-                    Err(Error::OpenDevice {
-                        path,
-                        source: e,
-                    })
+                    Err(Error::OpenDevice { path, source: e })
                 }
             }
         }
