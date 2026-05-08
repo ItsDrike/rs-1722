@@ -7,6 +7,8 @@ use getset::{CopyGetters, Getters};
 use num_enum::TryFromPrimitive;
 use thiserror::Error;
 
+use crate::audio::wav::{WavAudioFormat, WavHeader};
+
 use super::common::{AafFormat, AafSpecificData};
 
 #[derive(Error, Debug)]
@@ -67,7 +69,48 @@ pub enum PcmFormat {
     Int16Bit = 0x04,
 }
 
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+/// Errors that can occur while mapping WAV metadata to an AAF PCM format.
+pub enum UnsupportedWavEncoding {
+    #[error("Unsupported PCM bit depth for WAV PCM format: {0}")]
+    UnsupportedBitDepth(u16),
+
+    #[error("Floating-point WAV format requires 32-bit samples, got {0}")]
+    InvalidFloatBitDepth(u16),
+
+    #[error("Unsupported WAV audio format: {0:?}")]
+    UnsupportedAudioFormat(WavAudioFormat),
+}
+
 impl PcmFormat {
+    /// Map WAV header metadata to the corresponding AAF PCM format.
+    ///
+    /// The WAV encoding tag is modeled as [`WavAudioFormat`] because it is a
+    /// protocol-defined discriminator. The selected AAF format is derived from
+    /// the WAV sample container width (`WavHeader::bits_per_sample`), not from
+    /// the number of valid bits in each sample.
+    ///
+    /// # Errors
+    /// Returns [`UnsupportedWavEncoding`] if the WAV format cannot be represented as AAF PCM.
+    pub const fn from_wav_header(header: &WavHeader) -> Result<Self, UnsupportedWavEncoding> {
+        match header.audio_format {
+            WavAudioFormat::Pcm => match header.bits_per_sample {
+                16 => Ok(Self::Int16Bit),
+                24 => Ok(Self::Int24Bit),
+                32 => Ok(Self::Int32Bit),
+                _ => Err(UnsupportedWavEncoding::UnsupportedBitDepth(header.bits_per_sample)),
+            },
+            WavAudioFormat::IeeeFloat => {
+                if header.bits_per_sample == 32 {
+                    Ok(Self::Float32Bit)
+                } else {
+                    Err(UnsupportedWavEncoding::InvalidFloatBitDepth(header.bits_per_sample))
+                }
+            }
+            WavAudioFormat::Other(_) => Err(UnsupportedWavEncoding::UnsupportedAudioFormat(header.audio_format)),
+        }
+    }
+
     #[must_use]
     /// Returns the size of a single sample word in bits.
     ///
